@@ -16,6 +16,11 @@ from dashscope import TextEmbedding
 from openai import OpenAI
 from docx import Document
 
+deepseek_key = os.environ.get("DEEPSEEK_KEY")
+aliyun_key = os.environ.get("ALIYUN_KEY")
+if not (deepseek_key AND aliyun_key):
+    raise RuntimeError("OPENAI_API_KEY is not set")
+
 # ==========================================
 # 0. 基础配置与持久化路径
 # ==========================================
@@ -257,10 +262,7 @@ if 'loaded' not in st.session_state:
     st.session_state.loaded = True
 
 with st.sidebar:
-    st.header("⚙️ 系统配置")
-    aliyun_key = st.text_input("阿里云 Key", value="sk-9387cb66fcaf4c9f80766c4aad4e50c1", type="password")
-    deepseek_key = st.text_input("DeepSeek Key", value="sk-66d19c36002641c5a339c33e9ef22989", type="password")
-    
+
     st.markdown("---")
     st.markdown("**🧠 模型设定**")
     
@@ -489,4 +491,5 @@ with tab3:
             new_cfg = {"system_template": sys_t, "user_template": user_t}
             st.session_state.prompt_config = new_cfg
             with open(PATHS['prompt'], 'w') as f: json.dump(new_cfg, f, ensure_ascii=False)
+
             st.success("Prompt 已保存！"); time.sleep(1); st.rerun()
