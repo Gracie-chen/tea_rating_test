@@ -1,0 +1,23 @@
+name: Run Script
+
+on:
+  push:
+    branches: [ "main" ]
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+
+    # ⭐ 这一行决定能否读取 Environment secrets
+    environment: prod
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run script
+        env:
+          deepseek_key: ${{ secrets.DEEPSEEK_KEY }}
+          aliyun_key: ${{ secrets.ALIYUN_KEY }}
+        run: |
+          echo "Script is running"
+          node index.js
