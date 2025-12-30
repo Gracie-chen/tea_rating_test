@@ -275,35 +275,29 @@ with st.sidebar:
     st.header("⚙️ 系统配置")
     st.markdown("**🔐 API 配置（默认使用环境变量）**")
 
-    # 先从环境变量 / secrets 读
-    env_aliyun_key = os.getenv("ALIYUN_API_KEY") or st.secrets.get("ALIYUN_API_KEY", "")
-    env_deepseek_key = os.getenv("DEEPSEEK_API_KEY") or st.secrets.get("DEEPSEEK_API_KEY", "")
-
-    # UI 仍然保留，但默认值是环境变量
-    aliyun_key = st.text_input(
-        "阿里云 Key（可覆盖）",
-        value=env_aliyun_key,
-        type="password"
-    )
-
-    deepseek_key = st.text_input(
-        "DeepSeek Key（可覆盖）",
-        value=env_deepseek_key,
-        type="password"
-    )
+    # 从环境变量 / secrets 读取
+    aliyun_key = os.getenv("ALIYUN_API_KEY") or st.secrets.get("ALIYUN_API_KEY", "")
+    deepseek_key = os.getenv("DEEPSEEK_API_KEY") or st.secrets.get("DEEPSEEK_API_KEY", "")
 
     if not aliyun_key or not deepseek_key:
         st.warning("⚠️ 当前未配置 API Key，系统将无法运行")
         st.stop()
+    else:
+        # ✅ API Key 存在，视为“调用可用”
+        st.success("✅ API 调用成功")
 
     st.markdown("---")
     st.markdown("**🧠 模型设定**")
 
+    # 固定模型
+    model_name = "deepseek-chat"
+    st.markdown(f"**当前模型：** `{model_name}`")
+
+    # 如存在微调模型，仅展示提示（不允许切换）
     ft_status = DataManager.load_ft_status()
-    default_model = "deepseek-chat"
     if ft_status and ft_status.get("status") == "succeeded":
-        default_model = ft_status.get("fine_tuned_model", default_model)
-        st.toast(f"已加载微调模型: {default_model}", icon="🎉")
+        ft_model = ft_status.get("fine_tuned_model")
+        st.info(f"🎉 已检测到微调模型：`{ft_model}`（当前未启用）")
 
     model_id = st.text_input("Model ID", value=default_model)
 
@@ -584,5 +578,6 @@ with tab3:
             with open(PATHS['prompt'], 'w') as f: json.dump(new_cfg, f, ensure_ascii=False)
 
             st.success("Prompt 已保存！"); time.sleep(1); st.rerun()
+
 
 
