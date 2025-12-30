@@ -299,7 +299,7 @@ with st.sidebar:
         ft_model = ft_status.get("fine_tuned_model")
         st.info(f"🎉 已检测到微调模型：`{ft_model}`（当前未启用）")
 
-    model_id = st.text_input("Model ID", value=default_model)
+    model_id = model_name   # 意义不明
 
     embedder = AliyunEmbedder(aliyun_key)
     client = OpenAI(api_key=deepseek_key, base_url="https://api.deepseek.com")
@@ -578,6 +578,7 @@ with tab3:
             with open(PATHS['prompt'], 'w') as f: json.dump(new_cfg, f, ensure_ascii=False)
 
             st.success("Prompt 已保存！"); time.sleep(1); st.rerun()
+
 
 
 
