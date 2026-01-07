@@ -242,7 +242,9 @@ Step 5：列出帮助提升茶饮评分的建议（suggestion）。
 - 禁止出现：根据茶类/产地/工艺“推测”香气滋味；禁止“想象”没写的体验。
 - 禁止把“耐泡次数/价格/包装/品牌故事”当作任何因子的证据。
 - 禁止输出非 JSON 内容。
-- 禁止输出你的思考过程（只给结果 JSON）。""",
+- 禁止输出你的思考过程（只给结果 JSON）。
+
+{model_description}""",
     
     "user_template": """【待评分产品】
 {product_desc}
@@ -272,6 +274,8 @@ Step 5：列出帮助提升茶饮评分的建议（suggestion）。
 # 2. 逻辑函数
 # ==========================================
 
+def get_model_desc(): return "优雅性/辨识度/协调性/饱和度/持久性/苦涩度，关注各阶段感官表现。"
+
 def run_scoring(text, kb_res, case_res, prompt_cfg, embedder, client, model_id):
     vec = embedder.encode([text])
     ctx_txt, hits = "（无手册资料）", []
@@ -292,7 +296,7 @@ def run_scoring(text, kb_res, case_res, prompt_cfg, embedder, client, model_id):
                 k_sc = sc.get('苦涩度',{}).get('score', 0) if isinstance(sc,dict) and '苦涩度' in sc else 0
                 case_txt += f"\n参考案例: {c['text'][:30]}... -> 优雅性:{u_sc} 苦涩度:{k_sc}"
 
-    sys_p = prompt_cfg.get('system_template', DEFAULT_PROMPT_CONFIG['system_template']).replace("{model_description}", get_model_desc())
+    sys_p = prompt_cfg.get('system_template', DEFAULT_PROMPT_CONFIG['system_template']))
     user_p = prompt_cfg.get('user_template', DEFAULT_PROMPT_CONFIG['user_template']).format(product_desc=text, context_text=ctx_txt, case_text=case_txt)
 
     try:
@@ -666,6 +670,7 @@ with tab3:
             with open(PATHS['prompt'], 'w') as f: json.dump(new_cfg, f, ensure_ascii=False)
 
             st.success("Prompt 已保存！"); time.sleep(1); st.rerun()
+
 
 
 
