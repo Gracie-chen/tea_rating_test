@@ -247,8 +247,7 @@ Step 5：列出帮助提升茶饮评分的建议（suggestion）。
 - 禁止把“耐泡次数/价格/包装/品牌故事”当作任何因子的证据。
 - 禁止输出非 JSON 内容。
 - 禁止输出你的思考过程（只给结果 JSON）。
-
-{model_description}""",
+""",
     
     "user_template": """【待评分产品】
 {product_desc}
