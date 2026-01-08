@@ -273,128 +273,7 @@ Step 5：列出帮助提升茶饮评分的建议（suggestion）。
 }
 
 # 内置判例，AI生成，可能后续需要根据实际情况精细评分。
-SEED_CASES = [
-    {
-        "text": "干茶有清淡的花香，闻着干净舒服；入口柔和顺滑，整体偏淡，回甘不明显，几乎不苦不涩。",
-        "tags": "内置-清淡顺口",
-        "scores": {
-            "优雅性": {"score": 7, "comment": "香气清雅干净，闻着舒服。", "suggestion": "保持香气洁净度，避免闷味。"},
-            "辨识度": {"score": 5, "comment": "花香存在但不算鲜明。", "suggestion": "突出一个明确主香型。"},
-            "协调性": {"score": 7, "comment": "入口顺滑，整体融合度较好。", "suggestion": "维持平衡，避免甜感单独跳出。"},
-            "饱和度": {"score": 4, "comment": "茶汤偏淡，厚度一般。", "suggestion": "增强茶汤物质感。"},
-            "持久性": {"score": 4, "comment": "余韵较短，回甘不明显。", "suggestion": "提升回甘与留香持续。"},
-            "苦涩度": {"score": 8, "comment": "几乎不苦不涩，舒适度高。", "suggestion": "保持低涩感。"},
-        },
-    },
-    {
-        "text": "香气有明显蜜甜香，闻着讨喜；入口甜润，但中段略显单薄，回甘来得快但持续不久。",
-        "tags": "内置-甜润但偏薄",
-        "scores": {
-            "优雅性": {"score": 7, "comment": "蜜甜香让人愉悦。", "suggestion": "避免香气过甜显腻。"},
-            "辨识度": {"score": 7, "comment": "蜜甜香特征清晰。", "suggestion": "增强层次感。"},
-            "协调性": {"score": 6, "comment": "甜感突出但尚算协调。", "suggestion": "让甜与茶味更融合。"},
-            "饱和度": {"score": 4, "comment": "中段略显单薄。", "suggestion": "提升茶汤厚度。"},
-            "持久性": {"score": 5, "comment": "回甘来得快但不持久。", "suggestion": "增强后段延续性。"},
-            "苦涩度": {"score": 7, "comment": "轻微苦感，可接受。", "suggestion": "控制轻苦的峰值。"},
-        },
-    },
-    {
-        "text": "香气平淡，说不出具体香型；入口正常，没有明显缺点，也没有记忆点，整体偏中性。",
-        "tags": "内置-中性无突出",
-        "scores": {
-            "优雅性": {"score": 4, "comment": "香气平淡，愉悦感一般。", "suggestion": "提升香气质量。"},
-            "辨识度": {"score": 4, "comment": "香气缺乏记忆点。", "suggestion": "强化可识别香型。"},
-            "协调性": {"score": 5, "comment": "整体无明显冲突。", "suggestion": "提升整体完成度。"},
-            "饱和度": {"score": 4, "comment": "茶汤偏薄。", "suggestion": "增加物质感。"},
-            "持久性": {"score": 4, "comment": "喝完后余味较短。", "suggestion": "增强余韵。"},
-            "苦涩度": {"score": 6, "comment": "轻微苦涩但不影响饮用。", "suggestion": "让苦涩更快化开。"},
-        },
-    },
-    {
-        "text": "香气浓郁，有明显焙火与焦糖气息；入口厚实，但苦涩顶得较快，喉部有明显收敛。",
-        "tags": "内置-浓厚苦涩",
-        "scores": {
-            "优雅性": {"score": 4, "comment": "焙火重，愉悦感一般。", "suggestion": "降低焦糊与烟火感。"},
-            "辨识度": {"score": 8, "comment": "焙火与焦糖特征鲜明。", "suggestion": "控制香气集中度。"},
-            "协调性": {"score": 4, "comment": "浓厚与苦涩略显割裂。", "suggestion": "控制苦涩峰值。"},
-            "饱和度": {"score": 8, "comment": "茶汤浓厚有物质感。", "suggestion": "在厚度基础上提升顺滑度。"},
-            "持久性": {"score": 5, "comment": "余味尚可但不算干净。", "suggestion": "改善后段舒适度。"},
-            "苦涩度": {"score": 3, "comment": "苦涩明显，收敛感强。", "suggestion": "降低涩感与喉部刺激。"},
-        },
-    },
-    {
-        "text": "香气清爽，带一点果香；入口轻快，酸甜平衡，但茶味偏轻，整体显得清秀。",
-        "tags": "内置-清爽果香",
-        "scores": {
-            "优雅性": {"score": 7, "comment": "果香清爽，闻着舒服。", "suggestion": "保持清新而不过分张扬。"},
-            "辨识度": {"score": 6, "comment": "果香可辨但不算强烈。", "suggestion": "强化果香特征。"},
-            "协调性": {"score": 7, "comment": "酸甜与茶味融合较好。", "suggestion": "防止酸感突出。"},
-            "饱和度": {"score": 4, "comment": "茶汤偏轻。", "suggestion": "增强中段厚度。"},
-            "持久性": {"score": 5, "comment": "余味干净但不持久。", "suggestion": "延长回甘时间。"},
-            "苦涩度": {"score": 7, "comment": "几乎无涩，整体顺。", "suggestion": "维持舒适度。"},
-        },
-    },
-    {
-        "text": "香气带青味，略显生；入口有明显涩感，舌面收紧，化得慢。",
-        "tags": "内置-青涩明显",
-        "scores": {
-            "优雅性": {"score": 3, "comment": "青味明显，愉悦感偏低。", "suggestion": "减少生青气。"},
-            "辨识度": {"score": 6, "comment": "青味特征明显。", "suggestion": "转化为更成熟香型。"},
-            "协调性": {"score": 3, "comment": "涩感突出，破坏平衡。", "suggestion": "降低涩感强度。"},
-            "饱和度": {"score": 5, "comment": "茶汤有一定存在感。", "suggestion": "让厚度与顺滑同步。"},
-            "持久性": {"score": 4, "comment": "涩感停留时间较长。", "suggestion": "让后段更干净。"},
-            "苦涩度": {"score": 2, "comment": "涩感强，舒适度低。", "suggestion": "显著改善涩感。"},
-        },
-    },
-    {
-        "text": "香气干净克制，入口顺滑，整体平衡，没有明显短板，但也不算惊艳。",
-        "tags": "内置-均衡型",
-        "scores": {
-            "优雅性": {"score": 6, "comment": "香气干净，较为舒服。", "suggestion": "增加香气层次。"},
-            "辨识度": {"score": 5, "comment": "香气不突出。", "suggestion": "强化记忆点。"},
-            "协调性": {"score": 7, "comment": "整体平衡度较好。", "suggestion": "保持协调性。"},
-            "饱和度": {"score": 5, "comment": "茶汤中等厚度。", "suggestion": "略微提升物质感。"},
-            "持久性": {"score": 5, "comment": "余味中等。", "suggestion": "延长后段体验。"},
-            "苦涩度": {"score": 7, "comment": "苦涩轻微且可接受。", "suggestion": "维持顺口特性。"},
-        },
-    },
-    {
-        "text": "香气略闷，不够通透；入口厚，但后段发苦，整体显得压迫。",
-        "tags": "内置-闷厚苦",
-        "scores": {
-            "优雅性": {"score": 3, "comment": "香气闷，不够愉悦。", "suggestion": "改善香气通透度。"},
-            "辨识度": {"score": 5, "comment": "香气存在但不清晰。", "suggestion": "减少杂味。"},
-            "协调性": {"score": 3, "comment": "厚与苦不协调。", "suggestion": "让口感更圆润。"},
-            "饱和度": {"score": 7, "comment": "茶汤较厚。", "suggestion": "在厚度中提升舒适度。"},
-            "持久性": {"score": 4, "comment": "苦感停留时间较长。", "suggestion": "让后段更干净。"},
-            "苦涩度": {"score": 3, "comment": "苦感明显，略锁喉。", "suggestion": "降低刺激感。"},
-        },
-    },
-    {
-        "text": "香气柔和细腻，入口温润，茶汤不厚但很顺，整体喝着舒服。",
-        "tags": "内置-细腻顺滑",
-        "scores": {
-            "优雅性": {"score": 8, "comment": "香气柔和细腻，愉悦感高。", "suggestion": "保持细腻度。"},
-            "辨识度": {"score": 5, "comment": "香气偏内敛。", "suggestion": "略增强辨识度。"},
-            "协调性": {"score": 8, "comment": "整体非常顺。", "suggestion": "维持口感完整性。"},
-            "饱和度": {"score": 5, "comment": "茶汤不厚但不空。", "suggestion": "在顺滑基础上增加厚度。"},
-            "持久性": {"score": 6, "comment": "余韵干净，尚可。", "suggestion": "延长余香。"},
-            "苦涩度": {"score": 8, "comment": "几乎无苦涩。", "suggestion": "维持低涩表现。"},
-        },
-    },
-    {
-        "text": "香气淡而不杂；入口平稳，整体没有明显问题，但略显平淡。",
-        "tags": "内置-基础参考",
-        "scores": {
-            "优雅性": {"score": 5, "comment": "香气干净但平淡。", "suggestion": "提升香气层次。"},
-            "辨识度": {"score": 4, "comment": "缺乏明确特征。", "suggestion": "增加记忆点。"},
-            "协调性": {"score": 6, "comment": "整体尚算协调。", "suggestion": "提升完成度。"},
-            "饱和度": {"score": 4, "comment": "茶汤偏薄。", "suggestion": "增强物质感。"},
-            "持久性": {"score": 4, "comment": "余味短。", "suggestion": "增强后段。"},
-            "苦涩度": {"score": 6, "comment": "轻微苦感，可接受。", "suggestion": "让苦感更快化开。"},
-        },
-    },
-]
+# SEED_CASES = 
 
 
 # ==========================================
@@ -925,6 +804,7 @@ with tab3:
             with open(PATHS['prompt'], 'w') as f: json.dump(new_cfg, f, ensure_ascii=False)
 
             st.success("Prompt 已保存！"); time.sleep(1); st.rerun()
+
 
 
 
