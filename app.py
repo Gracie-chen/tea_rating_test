@@ -15,6 +15,9 @@ import dashscope
 from dashscope import TextEmbedding
 from openai import OpenAI
 from docx import Document
+import visualization
+import logic
+
 
 # ==========================================
 # 0. 基础配置与持久化路径
@@ -66,13 +69,21 @@ class DataManager:
         with open(data_path, "w" if is_json else "wb") as f:
             if is_json: json.dump(data, f, ensure_ascii=False, indent=2)
             else: pickle.dump(data, f)
-
+    
     @staticmethod
-    # 把“已确认判例”变成微调样本 
-    def append_to_finetune(case_text, scores, system_prompt, user_template):
+    def append_to_finetune(case_text, scores, system_prompt, user_template, master_comment="（人工校准）"):
+        """
+        把"已确认判例"变成微调样本 
+        修复：支持传入专家评语
+        """
         try:
+            # 打印调试信息
+            print(f"[DEBUG] append_to_finetune 被调用")
+            print(f"[DEBUG] master_comment: {master_comment}")
+            
             user_content = user_template.format(product_desc=case_text, context_text="", case_text="")
-            assistant_content = json.dumps({"master_comment": "（人工校准）", "scores": scores}, ensure_ascii=False)
+            
+            assistant_content = json.dumps({"master_comment": master_comment, "scores": scores}, ensure_ascii=False)
             entry = {
                 "messages": [
                     {"role": "system", "content": system_prompt},
@@ -82,9 +93,19 @@ class DataManager:
             }
             with open(PATHS['training_file'], "a", encoding="utf-8") as f:
                 f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+            
+            # 检查文件是否写入
+            if os.path.exists(PATHS['training_file']):
+                with open(PATHS['training_file'], "r", encoding="utf-8") as f:
+                    lines = f.readlines()
+                    print(f"[DEBUG] 当前微调文件行数: {len(lines)}")
+            
             return True
-        except: return False
-
+        except Exception as e:
+            print(f"[ERROR] append_to_finetune 失败: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            return False
     @staticmethod
     # 从磁盘恢复FAISS和数据
     def load(idx_path, data_path, is_json=False):
@@ -127,6 +148,54 @@ class AliyunEmbedder:
                 return np.array([i['embedding'] for i in resp.output['embeddings']]).astype("float32")
         except: pass
         return np.zeros((len(texts), 1024), dtype="float32")
+
+
+
+# =========================================================
+# 🔧 NEW: LLM 参与“用户输入筛选 / 规范化”
+# =========================================================
+def llm_normalize_user_input(raw_query: str, client: OpenAI) -> str:
+    """
+    使用 LLM 对用户输入做语义规范化 / 去噪
+    不涉及总体prompt 修改
+    """
+    system_prompt = (
+        """
+          A. 角色与目标
+          你是“茶评清洗器”。你的任务是从输入文本中提取并输出只与茶评相关的信息，删除无关内容，保持原意与原有表述风格，尽量少改写。
+          B. 什么算“相关信息”（保留）
+          仅保留与以下内容有关的句子/短语：
+          茶的基本信息：茶名/品类、产地、年份、工艺、等级、原料、香型等
+          干茶/茶汤/叶底：外观、色泽、条索、汤色、叶底描述
+          香气与滋味：香气类型、强弱、层次、回甘、生津、涩感、苦感、甜度、醇厚度、喉韵、体感等
+          冲泡信息与表现：器具、投茶量、水温、时间、出汤、几泡变化、耐泡度、适饮建议
+          主观评价与结论：好喝/一般/缺点/性价比（但要与茶有关）
+          C. 什么算“无关信息”（删除）
+          删除与茶评无直接关系的内容，例如：
+          与茶无关的生活日常、情绪宣泄、社交聊天、段子
+          店铺/物流/客服/包装破损/发货慢（除非“包装异味影响茶”这类直接影响品饮）
+          广告、价格链接、优惠券、引流话术、品牌吹水（除非是“性价比”且与品饮结论相关）
+          与其它产品/话题无关的对比闲聊
+          重复、凑字数内容
+          D. 输出格式
+          只输出清洗后的茶评正文，不要解释、不加标题、不输出“删除了什么”
+          如果输入中没有任何茶评相关信息，则输出："无相关茶评信息"
+          E. 操作原则
+          尽量保留原句；只做删除/少量拼接
+          不要补充不存在的细节，不要推测        
+          """
+    )
+
+    resp = client.chat.completions.create(
+        model="deepseek-chat",
+        temperature=0,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": raw_query}
+        ]
+    )
+    return resp.choices[0].message.content.strip()
+
 
 # 默认 Prompt
 DEFAULT_PROMPT_CONFIG = {
@@ -1124,14 +1193,11 @@ SEED_CASES = [
 
 
 
-
-
-
 # ==========================================
 # 2. 逻辑函数
 # ==========================================
 
-# 最核心***的评分函数；流程：用户文本 → 向量检索 → RAG + 判例拼 Prompt → 调用模型 → 解析 JSON
+# 最核心的评分函数；流程：用户文本 → 向量检索 → RAG + 判例拼 Prompt → 调用模型 → 解析 JSON
 def run_scoring(text, kb_res, case_res, prompt_cfg, embedder, client, model_id): # 输入：茶评、知识库、案例库、prompt配置等
     vec = embedder.encode([text]) # 文本通过阿里云embedder转为向量
     ctx_txt, hits = "（无手册资料）", [] # RAG初始
@@ -1356,287 +1422,608 @@ with st.sidebar:
                     
                     st.success("✅ RAG 数据导入成功！")
                     st.rerun()
-st.markdown('<div class="main-title">🍵 茶饮六因子 AI 评分器 Pro</div>', unsafe_allow_html=True)
+st.markdown('<div class="main-title">🍵 茶品六因子 AI 评分器 Pro</div>', unsafe_allow_html=True)
 st.markdown('<div class="slogan">“一片叶子落入水中，改变了水的味道...”</div>', unsafe_allow_html=True)
 
 # ==========================================
 # 4. 功能标签页
 # ==========================================
 tab1, tab2, tab3 = st.tabs(["💡 交互评分", "🚀 批量评分", "🛠️ 模型调优"])
-
 # --- Tab 1: 交互评分 ---
 with tab1:
-    st.info("AI 将参考知识库与判例库进行评分。确认结果后将自动更新 RAG 库和后台微调数据。")
-    user_input = st.text_area("输入茶评描述:", height=120)
+    st.info("AI 将参考知识库与判例库进行评分。确认结果后将自动更新 RAG 库。")
+    
+    # 使用会话状态存储用户输入，避免刷新后丢失
+    if 'current_user_input' not in st.session_state:
+        st.session_state.current_user_input = ""
+    
+    user_input = st.text_area(
+        "输入茶评描述:", 
+        value=st.session_state.current_user_input,
+        height=120,
+        key="user_input_area"
+    )
+    st.session_state.current_user_input = user_input
+    
+    # 使用会话状态存储评分结果
+    if 'last_scores' not in st.session_state:
+        st.session_state.last_scores = None
+    if 'last_master_comment' not in st.session_state:
+        st.session_state.last_master_comment = ""
     
     if st.button("开始评分", type="primary", use_container_width=True):
-        if not user_input or not client: st.warning("请检查输入或 API Key")
+        if not user_input or not client: 
+            st.warning("请检查输入或 API Key")
         else:
             with st.spinner(f"正在使用模型 {model_id} 品鉴..."):
-                scores, kb_hits, case_hits = run_scoring( # 评分json，命中知识库手册的chunks，命中的相似判例
+                scores, kb_hits, case_hits = run_scoring(
                     user_input, st.session_state.kb, st.session_state.cases,
                     st.session_state.prompt_config, embedder, client, model_id
                 )
                 if scores:
-                    mc = scores.get("master_comment", "暂无总评")
-                    st.markdown(f'<div class="master-comment"><b>👵 宗师总评：</b><br>{mc}</div>', unsafe_allow_html=True)
-                    
-                    cols = st.columns(3)
-                    factors = ["优雅性", "辨识度", "协调性", "饱和度", "持久性", "苦涩度"]
-                    s_dict = scores.get("scores", {})
-                    
-                    for i, fname in enumerate(factors):
-                        if fname in s_dict:
-                            data = s_dict[fname]
-                            with cols[i%3]:
-                                st.markdown(f"""<div class="factor-card"><div class="score-header"><span>{fname}</span><span>{data.get('score')}/9</span></div><div style="margin:5px 0; font-size:0.9em;">{data.get('comment')}</div><div class="advice-tag">💡 {data.get('suggestion','')}</div></div>""", unsafe_allow_html=True)
-
-                    with st.expander("📥 认可此评分？可保存或修改评分结果！"):
-                        # ---- 1) 提供可编辑的“人工校准区” ----
-                        factors = ["优雅性", "辨识度", "协调性", "饱和度", "持久性", "苦涩度"]
-                        edited_scores = {}
-
-                        # master_comment 也允许编辑（可选）
-                        edited_master = st.text_area(
-                            "✍️ 宗师总评（可选：不改则沿用模型输出）",
-                            value=scores.get("master_comment", ""),
-                            height=120
-                        )
-
-                        st.markdown("#### 🛠️ 六因子校准（可修改后再保存）")
-
-                        # 用 form 避免每改一个输入就触发保存逻辑混乱
-                        with st.form("adjust_scores_form"):
-                            c1, c2 = st.columns(2)
-                            for i, f in enumerate(factors):
-                                src = s_dict.get(f, {})
-                                col = c1 if i % 2 == 0 else c2
-                                with col:
-                                    st.markdown(f"**{f}**")
-
-                                    # 分数（0-9）
-                                    score_val = st.number_input(
-                                        f"{f} 分数",
-                                        min_value=0, max_value=9,
-                                        value=int(src.get("score", 4)),
-                                        step=1,
-                                        key=f"edit_score_{f}"
-                                    )
-
-                                    # 评语/建议
-                                    comment_val = st.text_input(
-                                        f"{f} 评语",
-                                        value=str(src.get("comment", "")),
-                                        key=f"edit_comment_{f}"
-                                    )
-                                    suggestion_val = st.text_input(
-                                        f"{f} 建议",
-                                        value=str(src.get("suggestion", "")),
-                                        key=f"edit_suggestion_{f}"
-                                    )
-
-                                    edited_scores[f] = {
-                                        "score": int(score_val),
-                                        "comment": comment_val,
-                                        "suggestion": suggestion_val
-                                    }
-
-                            # ---- 2) 保存按钮：以“编辑后的结果”为准落盘 & 入训练集 ----
-                            submitted = st.form_submit_button("✅ 使用校准后的评分保存（加入判例库 & 训练集）")
-
-                        if submitted:
-                            # 保存判例库用“校准后的 scores”
-                            new_case = {"text": user_input, "scores": edited_scores, "tags": "交互生成-人工校准"}
-                            st.session_state.cases[1].append(new_case)
-
-                            vec = embedder.encode([user_input])
-                            st.session_state.cases[0].add(vec)
-                            DataManager.save(
-                                st.session_state.cases[0],
-                                st.session_state.cases[1],
-                                PATHS['case_index'],
-                                PATHS['case_data'],
-                                is_json=True
-                            )
-
-                            # 训练集也使用校准后的 scores（建议把 master_comment 也写入训练集）
-                            sys_p = st.session_state.prompt_config['system_template']
-
-                            # 这里沿用 append_to_finetune，但它目前 master_comment 固定“（人工校准）”
-                            # 如果希望把 edited_master 写入训练集，建议升级 append_to_finetune
-                            DataManager.append_to_finetune(
-                                user_input,
-                                edited_scores,
-                                sys_p,
-                                st.session_state.prompt_config['user_template']
-                            )
-
-                            st.success("✅ 已用人工校准结果存档！数据已加入判例库和微调队列。")
-                            time.sleep(1)
-                            st.rerun()
-
-                        # ---- 3) 同时保留原“直接认可保存”快捷入口（可选）----
-                        st.markdown("---")
-                        if st.button("⚡ 直接认可模型评分并保存（不校准）"):
-                            new_case = {"text": user_input, "scores": s_dict, "tags": "交互生成-未校准"}
-                            st.session_state.cases[1].append(new_case)
-
-                            vec = embedder.encode([user_input])
-                            st.session_state.cases[0].add(vec)
-                            DataManager.save(st.session_state.cases[0], st.session_state.cases[1], PATHS['case_index'], PATHS['case_data'], is_json=True)
-
-                            sys_p = st.session_state.prompt_config['system_template']
-                            DataManager.append_to_finetune(user_input, s_dict, sys_p, st.session_state.prompt_config['user_template'])
-
-                            st.success("已按模型原评分存档！")
-                            time.sleep(1)
-                            st.rerun()
-
-
-# --- Tab 2: 批量评分 ---
-with tab2:
-    up_file = st.file_uploader("上传文件 (支持 .txt / .docx)", type=['txt','docx'])
-    if up_file and st.button("开始批量处理"):
-        if not client: st.error("请配置 Key")
-        else:
-            txt = parse_file(up_file)
-            lines = [l.strip() for l in txt.split('\n') if len(l)>10]
-            results = []
-            bar = st.progress(0)
-            for i, line in enumerate(lines):
-                s, _, _ = run_scoring(line, st.session_state.kb, st.session_state.cases, st.session_state.prompt_config, embedder, client, model_id)
-                results.append({"id": i+1, "text": line, "scores": s})
-                bar.progress((i+1)/len(lines))
-            st.success("完成！")
-            doc_io = create_word_report(results)
-            st.download_button("📥 下载 Word 报告", doc_io, "茶评报告.docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
-
-# --- Tab 3: 模型调优 (自动化微调流程) ---
-with tab3:
-    c1, c2, c3 = st.columns(3)
+                    # 保存评分结果到会话状态
+                    st.session_state.last_scores = scores
+                    st.session_state.last_master_comment = scores.get("master_comment", "暂无总评")
+                    # 使用rerun显示结果
+                    st.rerun()
     
-    # Column 1: RAG 知识库
-    with c1:
-        st.subheader("📚 RAG 知识库")
-        files = st.file_uploader("上传PDF", accept_multiple_files=True, key="kb_up")
-        st.info(f"💾 当前存储: {len(st.session_state.kb[1])} 片段")
-        if files and st.button("更新知识库"):
-            if not embedder: st.error("需 API Key")
+    # 显示上次评分结果（如果有）
+    if st.session_state.last_scores is not None:
+        scores = st.session_state.last_scores
+        mc = st.session_state.last_master_comment
+        s_dict = scores.get("scores", {})
+        
+        # 显示宗师总评
+        st.markdown(f'<div class="master-comment"><b>👵 宗师总评：</b><br>{mc}</div>', unsafe_allow_html=True)
+        
+        # 显示六因子评分
+        cols = st.columns(3)
+        factors = ["优雅性", "辨识度", "协调性", "饱和度", "持久性", "苦涩度"]
+        
+        for i, fname in enumerate(factors):
+            if fname in s_dict:
+                data = s_dict[fname]
+                with cols[i%3]:
+                    st.markdown(f"""<div class="factor-card"><div class="score-header"><span>{fname}</span><span>{data.get('score')}/9</span></div><div style="margin:5px 0; font-size:0.9em;">{data.get('comment')}</div><div class="advice-tag">💡 {data.get('suggestion','')}</div></div>""", unsafe_allow_html=True)
+        
+        st.subheader("📊 风味可视化")
+        
+        # 创建布局：形态图
+        vis_col2 = st.columns(1) [0]
+        with vis_col2:
+            st.caption("三段风味形态 (Flavor Shape)")
+            # 调用 visualization.py 绘制形态图
+            fig_shape = visualization.plot_flavor_shape(scores)
+            st.pyplot(fig_shape, use_container_width=True)
+
+        # 完整的校准和保存区域
+        with st.expander("📝 校准评分结果并保存到判例库", expanded=True):
+            st.write(f"当前判例库数量: **{len(st.session_state.cases[1])}** 条")
+            
+            # 方法1: 保存原始评分（快捷方式）
+            col1, col2 = st.columns(2)
+            with col1:
+                if st.button("💾 保存原始评分", type="primary", use_container_width=True):
+                    try:
+                        # 创建新判例
+                        new_case = {
+                            "text": user_input,
+                            "scores": s_dict,
+                            "tags": "交互生成-原始",
+                            "master_comment": mc,
+                            "created_at": time.strftime("%Y-%m-%d %H:%M:%S")
+                        }
+                        
+                        # 1. 添加到内存
+                        st.session_state.cases[1].append(new_case)
+                        new_count = len(st.session_state.cases[1])
+                        
+                        # 2. 生成向量
+                        vec = embedder.encode([user_input])
+                        
+                        # 3. 添加到向量索引
+                        if st.session_state.cases[0].ntotal == 0:
+                            # 如果索引为空，创建新索引
+                            st.session_state.cases = (faiss.IndexFlatL2(1024), st.session_state.cases[1])
+                            st.session_state.cases[0].add(vec)
+                        else:
+                            # 索引已存在，添加向量
+                            st.session_state.cases[0].add(vec)
+                        
+                        # 4. 保存到磁盘
+                        DataManager.save(
+                            st.session_state.cases[0],
+                            st.session_state.cases[1],
+                            PATHS['case_index'],
+                            PATHS['case_data'],
+                            is_json=True
+                        )
+                        
+                        st.success(f"✅ 原始评分保存成功！判例库现有 {new_count} 条判例。")
+                        st.balloons()
+                        time.sleep(2)
+                        st.rerun()
+                        
+                    except Exception as e:
+                        st.error(f"保存失败: {str(e)}")
+            
+            # 校准区域
+            st.markdown("---")
+            st.markdown("### 🔧 完整校准")
+            
+            # 校准宗师总评
+            calibrated_master = st.text_area(
+                "✍️ 宗师总评（可编辑）",
+                value=mc,
+                height=100,
+                key="calibrated_master"
+            )
+            
+            # 校准六因子
+            calibrated_scores = {}
+            
+            # 创建6个因子校准面板
+            factor_tabs = st.tabs(factors)
+            
+            for i, factor_name in enumerate(factors):
+                with factor_tabs[i]:
+                    if factor_name in s_dict:
+                        original = s_dict[factor_name]
+                        
+                        # 分数
+                        calibrated_score = st.slider(
+                            "分数",
+                            0, 9, 
+                            value=int(original.get("score", 4)),
+                            key=f"score_{factor_name}"
+                        )
+                        
+                        # 评语
+                        calibrated_comment = st.text_area(
+                            "评语",
+                            value=original.get("comment", ""),
+                            height=60,
+                            key=f"comment_{factor_name}"
+                        )
+                        
+                        # 建议
+                        calibrated_suggestion = st.text_area(
+                            "改进建议",
+                            value=original.get("suggestion", ""),
+                            height=60,
+                            key=f"suggestion_{factor_name}"
+                        )
+                        
+                        calibrated_scores[factor_name] = {
+                            "score": calibrated_score,
+                            "comment": calibrated_comment,
+                            "suggestion": calibrated_suggestion
+                        }
+            
+            # 保存校准后评分
+            col1, col2, col3 = st.columns([1, 1, 2])
+            with col1:
+                if st.button("💾 保存校准评分", type="primary", use_container_width=True):
+                    try:
+                        # 创建新判例
+                        new_case = {
+                            "text": user_input,
+                            "scores": calibrated_scores,
+                            "tags": "交互生成-已校准",
+                            "master_comment": calibrated_master,
+                            "created_at": time.strftime("%Y-%m-%d %H:%M:%S")
+                        }
+                        
+                        # 1. 添加到内存
+                        st.session_state.cases[1].append(new_case)
+                        new_count = len(st.session_state.cases[1])
+                        
+                        # 2. 生成向量
+                        vec = embedder.encode([user_input])
+                        
+                        # 3. 添加到向量索引
+                        if st.session_state.cases[0].ntotal == 0:
+                            st.session_state.cases = (faiss.IndexFlatL2(1024), st.session_state.cases[1])
+                            st.session_state.cases[0].add(vec)
+                        else:
+                            st.session_state.cases[0].add(vec)
+                        
+                        # 4. 保存到磁盘
+                        DataManager.save(
+                            st.session_state.cases[0],
+                            st.session_state.cases[1],
+                            PATHS['case_index'],
+                            PATHS['case_data'],
+                            is_json=True
+                        )
+                        
+                        # 5. 同时保存到微调数据
+                        sys_p = st.session_state.prompt_config['system_template']
+                        DataManager.append_to_finetune(
+                            user_input,
+                            calibrated_scores,
+                            sys_p,
+                            st.session_state.prompt_config['user_template'],
+                            master_comment=calibrated_master
+                        )
+                        
+                        st.success(f"✅ 校准评分保存成功！判例库现有 {new_count} 条判例。")
+                        st.balloons()
+                        time.sleep(2)
+                        st.rerun()
+                        
+                    except Exception as e:
+                        st.error(f"保存失败: {str(e)}")
+            
+            with col2:
+                if st.button("🔄 重置校准", use_container_width=True):
+                    st.success("校准已重置为原始值")
+                    time.sleep(1)
+                    st.rerun()
+            
+            with col3:
+                # 预览校准后的结果
+                with st.expander("👁️ 预览校准结果", expanded=False):
+                    st.markdown(f"**宗师总评:** {calibrated_master}")
+                    st.markdown("**六因子评分:**")
+                    for factor_name, data in calibrated_scores.items():
+                        st.write(f"**{factor_name}:** {data['score']}/9")
+                        st.write(f"评语: {data['comment']}")
+                        st.write(f"建议: {data['suggestion']}")
+                        st.write("---")
+    # --- Tab 2: 批量评分 ---
+    with tab2:
+        up_file = st.file_uploader("上传文件 (支持 .txt / .docx)", type=['txt','docx'])
+        if up_file and st.button("开始批量处理"):
+            if not client: st.error("请配置 Key")
             else:
-                with st.spinner("处理并存盘..."):
-                    raw = "".join([parse_file(f) for f in files])
-                    chunks = [raw[i:i+600] for i in range(0,len(raw),500)]
-                    vecs = embedder.encode(chunks)
-                    idx = faiss.IndexFlatL2(1024)
-                    idx.add(vecs)
-                    st.session_state.kb = (idx, chunks)
-                    DataManager.save(idx, chunks, PATHS['kb_index'], PATHS['kb_chunks'])
-                    st.success("知识库已更新！"); time.sleep(1); st.rerun()
-
-    # Column 2: 判例库 & 微调控制台
-    with c2:
-        st.subheader("⚖️ 判例库 & 微调")
-        st.caption("你录入的判例将自动积累为微调数据")
+                txt = parse_file(up_file)
+                lines = [l.strip() for l in txt.split('\n') if len(l)>10]
+                results = []
+                bar = st.progress(0)
+                for i, line in enumerate(lines):
+                    s, _, _ = run_scoring(line, st.session_state.kb, st.session_state.cases, st.session_state.prompt_config, embedder, client, model_id)
+                    results.append({"id": i+1, "text": line, "scores": s})
+                    bar.progress((i+1)/len(lines))
+                st.success("完成！")
+                doc_io = create_word_report(results)
+                st.download_button("📥 下载 Word 报告", doc_io, "茶评报告.docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+    
+    # --- Tab 3: 模型调优 (自动化微调流程) ---
+    with tab3:
+        c1, c2, c3 = st.columns(3)
         
-        # 修复点：先定义 case_count
-        case_count = len(st.session_state.cases[1])
-        st.info(f"💾 当前判例: {case_count} 条")
-
-        # === 微调控制面板 ===
-        st.markdown("#### ☁️ 云端微调控制台")
+        # Column 1: RAG 知识库
+        with c1:
+            st.subheader("📚 RAG 知识库")
+            files = st.file_uploader("上传PDF", accept_multiple_files=True, key="kb_up")
+            st.info(f"💾 当前存储: {len(st.session_state.kb[1])} 片段")
+            if files and st.button("更新知识库"):
+                if not embedder: st.error("需 API Key")
+                else:
+                    with st.spinner("处理并存盘..."):
+                        raw = "".join([parse_file(f) for f in files])
+                        chunks = [raw[i:i+600] for i in range(0,len(raw),500)]
+                        vecs = embedder.encode(chunks)
+                        idx = faiss.IndexFlatL2(1024)
+                        idx.add(vecs)
+                        st.session_state.kb = (idx, chunks)
+                        DataManager.save(idx, chunks, PATHS['kb_index'], PATHS['kb_chunks'])
+                        st.success("知识库已更新！"); time.sleep(1); st.rerun()
+    
+        # Column 2: 判例库 & 微调控制台
+        with c2:
+            st.subheader("⚖️ 判例库 & 微调")
+            st.caption("你录入的判例将自动积累为微调数据")
+            
+            # 修复点：先定义 case_count
+            case_count = len(st.session_state.cases[1])
+            st.info(f"💾 当前判例: {case_count} 条")
+    # 在tab3中添加一个按钮
+        with c2:
+            st.markdown("#### 📥 数据迁移")
         
-        line_count = 0
-        if PATHS['training_file'].exists():
-            try: line_count = sum(1 for _ in open(PATHS['training_file'], 'r', encoding='utf-8'))
-            except: pass
-        
-        st.write(f"可用微调数据: **{line_count} 条**")
-        
-        if line_count >= 10:
+            if st.button("🚀 将现有判例转为微调数据"):
+                if len(st.session_state.cases[1]) > 0:
+                    count = 0
+                    prompt_cfg = st.session_state
+                    for case in st.session_state.cases[1]:
+                        if DataManager.append_to_finetune(
+                            case["text"],
+                            case["scores"],
+                            prompt_cfg.get('system_template', ''),
+                            prompt_cfg.get('user_template', '')
+                        ):
+                            count += 1
+                
+                    st.success(f"成功导入 {count} 条判例到微调数据！")
+                    st.rerun()
+                else:
+                    st.warning("判例库为空")
+            # === 微调控制面板 ===
+            st.markdown("#### ☁️ 云端微调控制台")
+            
+            line_count = 0
+            if PATHS['training_file'].exists():
+                try: line_count = sum(1 for _ in open(PATHS['training_file'], 'r', encoding='utf-8'))
+                except: pass
+            
+            st.write(f"可用微调数据: **{line_count} 条**")
+            
+            
             if st.button("🚀 一键启动微调 (DeepSeek)"):
-                if not client: st.error("请先配置 API Key")
+                if not client: 
+                    st.error("请先配置 API Key")
                 else:
                     try:
+                        # 1. 上传训练文件
                         with open(PATHS['training_file'], "rb") as f:
                             file_obj = client.files.create(file=f, purpose="fine-tune")
-                        job = client.fine_tuning.jobs.create(
-                            training_file=file_obj.id,
-                            model="deepseek-chat",
-                            suffix="tea-expert"
-                        )
-                        DataManager.save_ft_status(job.id, "queued", fine_tuned_model=None)
-                        st.success(f"微调任务已启动！Job ID: {job.id}")
-                        time.sleep(1); st.rerun()
-                    except Exception as e:
-                        st.error(f"启动微调失败: {e}")
-        else:
-            st.warning("⚠️ 建议积累至少 10 条判例后进行微调。")
-
-        ft_status = DataManager.load_ft_status()
-        if ft_status:
-            st.markdown(f"""
-            <div class="ft-card">
-                <b>🔄 最近任务状态</b><br>
-                Job ID: <code>{ft_status.get('job_id', 'N/A')}</code><br>
-                状态: <b>{ft_status.get('status', 'N/A')}</b><br>
-                模型: {ft_status.get('fine_tuned_model', 'N/A')}
-            </div>
-            """, unsafe_allow_html=True)
-            
-            if ft_status.get('status') in ['queued', 'running']:
-                if st.button("🔄 刷新状态"):
-                    try:
-                        job = client.fine_tuning.jobs.retrieve(ft_status['job_id'])
-                        new_status = job.status
-                        ft_info = {"job_id": job.id, "status": new_status}
-                        if new_status == 'succeeded':
-                            ft_info["fine_tuned_model"] = job.fine_tuned_model
-                            st.success(f"训练完成！模型: {ft_info['fine_tuned_model']}")
-                            st.balloons()
-                        elif new_status == 'failed':
-                            ft_info["error"] = job.error.message
-                            st.error(f"训练失败: {job.error.message}")
                         
-                        DataManager.save_ft_status(ft_info['job_id'], ft_info['status'], ft_info.get('fine_tuned_model'))
-                        time.sleep(1); st.rerun()
+                        st.info(f"文件上传成功，文件ID: {file_obj.id}")
+                        
+                        # 2. 尝试多个可能的微调API端点
+                        job = None
+                        error_messages = []
+                        
+                        # 方法1: 尝试标准fine_tuning.jobs.create
+                        try:
+                            job = client.fine_tuning.jobs.create(
+                                training_file=file_obj.id,
+                                model="deepseek-chat",
+                                suffix="tea-expert-v1",
+                                hyperparameters={
+                                    "n_epochs": 3,
+                                    "batch_size": 1,
+                                    "learning_rate_multiplier": 1.0
+                                }
+                            )
+                            st.success(f"微调任务创建成功！Job ID: {job.id}")
+                            
+                        except Exception as e1:
+                            error_messages.append(f"方法1失败: {str(e1)[:200]}")
+                            
+                            # 方法2: 尝试不同的模型名称
+                            try:
+                                job = client.fine_tuning.jobs.create(
+                                    training_file=file_obj.id,
+                                    model="deepseek-reasoner",  # 尝试其他模型
+                                    suffix="tea-expert-v1"
+                                )
+                                st.success(f"微调任务创建成功！Job ID: {job.id} (使用deepseek-reasoner)")
+                                
+                            except Exception as e2:
+                                error_messages.append(f"方法2失败: {str(e2)[:200]}")
+                                
+                                # 方法3: 直接API调用（备用方案）
+                                import requests
+                                
+                                try:
+                                    headers = {
+                                        "Authorization": f"Bearer {st.session_state.get('deepseek_key', '')}",
+                                        "Content-Type": "application/json"
+                                    }
+                                    
+                                    # 尝试多个可能的微调端点
+                                    endpoints = [
+                                        "https://api.deepseek.com/fine_tuning/jobs",
+                                        "https://api.deepseek.com/v1/fine_tuning/jobs",
+                                        "https://api.deepseek.com/finetuning/jobs",
+                                        "https://api.deepseek.com/v1/finetuning/jobs"
+                                    ]
+                                    
+                                    payload = {
+                                        "training_file": file_obj.id,
+                                        "model": "deepseek-chat",
+                                        "suffix": "tea-expert-v1"
+                                    }
+                                    
+                                    for endpoint in endpoints:
+                                        try:
+                                            response = requests.post(endpoint, headers=headers, json=payload, timeout=30)
+                                            
+                                            if response.status_code == 200:
+                                                job_data = response.json()
+                                                job_id = job_data.get("id")
+                                                st.success(f"微调任务创建成功！Job ID: {job_id}")
+                                                
+                                                # 创建伪job对象以兼容后续代码
+                                                class MockJob:
+                                                    def __init__(self, job_id):
+                                                        self.id = job_id
+                                                
+                                                job = MockJob(job_id)
+                                                break
+                                                
+                                            elif response.status_code != 404:
+                                                st.warning(f"端点 {endpoint} 返回 {response.status_code}")
+                                                
+                                        except Exception as endpoint_error:
+                                            continue
+                                    
+                                    if not job:
+                                        raise Exception("所有微调端点都返回404或失败")
+                                        
+                                except Exception as e3:
+                                    error_messages.append(f"方法3失败: {str(e3)[:200]}")
+                        
+                        # 3. 如果微调任务创建成功，保存状态
+                        if job:
+                            DataManager.save_ft_status(job.id, "queued", fine_tuned_model=None)
+                            st.success(f"微调任务已启动！Job ID: {job.id}")
+                            
+                            # 显示任务监控信息
+                            st.info("""
+                            **微调任务已提交！**
+                            
+                            接下来你可以：
+                            1. 等待几分钟后点击"刷新状态"按钮查看进度
+                            2. 微调完成后，系统将自动使用新模型评分
+                            3. 如果需要取消任务，请联系DeepSeek客服
+                            """)
+                            
+                            time.sleep(2)
+                            st.rerun()
+                        else:
+                            # 所有方法都失败，显示详细的错误信息和备选方案
+                            st.error("⚠️ DeepSeek微调功能暂时不可用")
+                            
+                            with st.expander("🔍 查看详细错误信息"):
+                                for i, msg in enumerate(error_messages, 1):
+                                    st.write(f"{i}. {msg}")
+                            
+                            with st.expander("💡 备选方案"):
+                                st.markdown("""
+                                **由于DeepSeek微调API暂时不可用，建议使用以下方案：**
+                                
+                                ### 方案A：增强现有系统（立即可用）
+                                ```python
+                                # 1. 增加RAG检索数量
+                                _, idx = kb_res[0].search(vec, 5)  # 从3增加到5
+                                
+                                # 2. 优化系统Prompt
+                                # 在现有Prompt中添加更多示例和规则
+                                
+                                # 3. 使用更低的temperature
+                                temperature=0.1  # 更一致的输出
+                                ```
+                                
+                                ### 方案B：导出数据在其他平台微调
+                                1. 下载训练数据
+                                2. 在Google Colab使用免费GPU微调
+                                3. 使用LM Studio本地微调
+                                
+                                ### 方案C：等待DeepSeek修复API
+                                1. 关注DeepSeek官方公告
+                                2. 联系DeepSeek技术支持
+                                3. 暂时使用基础模型
+                                """)
+                            
+                            # 提供数据导出功能
+                            st.markdown("---")
+                            st.subheader("📥 导出训练数据")
+                            
+                            with open(PATHS['training_file'], "rb") as f:
+                                st.download_button(
+                                    label="下载训练数据 (JSONL格式)",
+                                    data=f,
+                                    file_name="tea_training_data.jsonl",
+                                    mime="application/json",
+                                    key="download_training_data"
+                                )
+                            
+                            st.info("下载后可在Colab、LM Studio等平台进行微调")
+                            
                     except Exception as e:
-                        st.error(f"查询状态失败: {e}")
-
-        with st.expander("➕ 添加精细判例"):
-            with st.form("case_form"):
-                f_txt = st.text_area("判例描述", height=80)
-                f_tag = st.text_input("标签", "人工录入")
-                st.markdown("**因子评分详情**")
-                fc1, fc2 = st.columns(2)
-                factors = ["优雅性", "辨识度", "协调性", "饱和度", "持久性", "苦涩度"]
-                input_scores = {}
-                for i, f in enumerate(factors):
-                    with (fc1 if i%2==0 else fc2):
-                        val = st.number_input(f"{f}分数", 0,9,7, key=f"s_{i}")
-                        cmt = st.text_input(f"{f}评语", key=f"c_{i}")
-                        sug = st.text_input(f"{f}建议", key=f"a_{i}")
-                        input_scores[f] = {"score": val, "comment": cmt, "suggestion": sug}
+                        # 通用错误处理
+                        error_msg = str(e)
+                        
+                        # 针对404错误的特殊处理
+                        if "404" in error_msg:
+                            st.error("""
+                            ❌ **404错误：DeepSeek微调API端点不存在**
+                            
+                            可能的原因：
+                            1. DeepSeek微调功能正在维护中
+                            2. API端点已变更
+                            3. 你的账户暂未开通微调权限
+                            
+                            **解决方案：**
+                            1. 等待DeepSeek官方修复
+                            2. 使用基础模型+增强RAG继续评分
+                            3. 导出数据在其他平台微调
+                            """)
+                            
+                            # 提供降级方案按钮
+                            if st.button("🔄 切换到增强RAG模式", key="switch_to_rag"):
+                                st.session_state['enhanced_rag'] = True
+                                st.success("已切换到增强RAG模式！")
+                                time.sleep(1)
+                                st.rerun()
+                                
+                        else:
+                            # 其他错误
+                            st.error(f"微调启动失败: {error_msg}")
+                            
+                            # 显示调试信息
+                            with st.expander("🛠️ 调试信息"):
+                                st.write(f"错误类型: {type(e).__name__}")
+                                st.write(f"完整错误: {error_msg}")
+                                
+                                # 尝试获取更多API信息
+                                try:
+                                    # 测试基本的API连通性
+                                    test_response = client.models.list()
+                                    st.write("✅ API基础连接正常")
+                                    st.write(f"可用模型数量: {len(test_response.data)}")
+                                except:
+                                    st.write("❌ API基础连接失败")
+    
+            ft_status = DataManager.load_ft_status()
+            if ft_status:
+                st.markdown(f"""
+                <div class="ft-card">
+                    <b>🔄 最近任务状态</b><br>
+                    Job ID: <code>{ft_status.get('job_id', 'N/A')}</code><br>
+                    状态: <b>{ft_status.get('status', 'N/A')}</b><br>
+                    模型: {ft_status.get('fine_tuned_model', 'N/A')}
+                </div>
+                """, unsafe_allow_html=True)
                 
-                if st.form_submit_button("保存"):
-                    if not embedder: st.error("需 API Key")
-                    else:
-                        new_c = {"text": f_txt, "tags": f_tag, "scores": input_scores}
-                        st.session_state.cases[1].append(new_c)
-                        vec = embedder.encode([f_txt])
-                        st.session_state.cases[0].add(vec)
-                        DataManager.save(st.session_state.cases[0], st.session_state.cases[1], PATHS['case_index'], PATHS['case_data'], is_json=True)
-                        
-                        sys_p = st.session_state.prompt_config['system_template']
-                        DataManager.append_to_finetune(f_txt, input_scores, sys_p, st.session_state.prompt_config['user_template'])
-                        
-                        st.success("已保存！")
-                        time.sleep(1); st.rerun()
-
-        st.write(f"现有判例预览:")
-        for i, c in enumerate(st.session_state.cases[1][-5:]):
-            with st.expander(f"#{case_count-i} {c.get('tags','')}"):
-                st.write(c['text'][:50]+"...")
-                st.json(c['scores'])
+                if ft_status.get('status') in ['queued', 'running']:
+                    if st.button("🔄 刷新状态"):
+                        try:
+                            job = client.fine_tuning.jobs.retrieve(ft_status['job_id'])
+                            new_status = job.status
+                            ft_info = {"job_id": job.id, "status": new_status}
+                            if new_status == 'succeeded':
+                                ft_info["fine_tuned_model"] = job.fine_tuned_model
+                                st.success(f"训练完成！模型: {ft_info['fine_tuned_model']}")
+                                st.balloons()
+                            elif new_status == 'failed':
+                                ft_info["error"] = job.error.message
+                                st.error(f"训练失败: {job.error.message}")
+                            
+                            DataManager.save_ft_status(ft_info['job_id'], ft_info['status'], ft_info.get('fine_tuned_model'))
+                            time.sleep(1); st.rerun()
+                        except Exception as e:
+                            st.error(f"查询状态失败: {e}")
+    
+            with st.expander("➕ 添加精细判例"):
+                with st.form("case_form"):
+                    f_txt = st.text_area("判例描述", height=80)
+                    f_tag = st.text_input("标签", "人工录入")
+                    st.markdown("**因子评分详情**")
+                    fc1, fc2 = st.columns(2)
+                    factors = ["优雅性", "辨识度", "协调性", "饱和度", "持久性", "苦涩度"]
+                    input_scores = {}
+                    for i, f in enumerate(factors):
+                        with (fc1 if i%2==0 else fc2):
+                            val = st.number_input(f"{f}分数", 0,9,7, key=f"s_{i}")
+                            cmt = st.text_input(f"{f}评语", key=f"c_{i}")
+                            sug = st.text_input(f"{f}建议", key=f"a_{i}")
+                            input_scores[f] = {"score": val, "comment": cmt, "suggestion": sug}
+                    
+                    if st.form_submit_button("保存"):
+                        if not embedder: st.error("需 API Key")
+                        else:
+                            new_c = {"text": f_txt, "tags": f_tag, "scores": input_scores}
+                            st.session_state.cases[1].append(new_c)
+                            vec = embedder.encode([f_txt])
+                            st.session_state.cases[0].add(vec)
+                            DataManager.save(st.session_state.cases[0], st.session_state.cases[1], PATHS['case_index'], PATHS['case_data'], is_json=True)
+                            
+                            sys_p = st.session_state.prompt_config['system_template']
+                            DataManager.append_to_finetune(f_txt, input_scores, sys_p, st.session_state.prompt_config['user_template'])
+                            
+                            st.success("已保存！")
+                            time.sleep(1); st.rerun()
+    
+            st.write(f"现有判例预览:")
+            for i, c in enumerate(st.session_state.cases[1][-5:]):
+                with st.expander(f"#{case_count-i} {c.get('tags','')}"):
+                    st.write(c['text'][:50]+"...")
+                    st.json(c['scores'])
 
     # Column 3: Prompt
     with c3:
@@ -1655,6 +2042,22 @@ with tab3:
             with open(PATHS['prompt'], 'w') as f: json.dump(new_cfg, f, ensure_ascii=False)
 
             st.success("Prompt 已保存！"); time.sleep(1); st.rerun()
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
