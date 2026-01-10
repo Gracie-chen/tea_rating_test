@@ -1308,49 +1308,13 @@ def bootstrap_seed_cases_if_empty(embedder):
     )
 
 def calculate_section_scores(scores):
-    # 1) 如果是字符串：尝试解析成 dict
-    if isinstance(scores_var, str):
-        s = scores_var.strip()
+    s = scores["scores"]   # ← 就这一行是关键
 
-        # 兼容你这种 {{ }} 的写法（模板常见）
-        # 注意：这是“修正字符串”，让它变成可解析 JSON
-        s = s.replace("{{", "{").replace("}}", "}")
-
-        try:
-            data = json.loads(s)
-        except json.JSONDecodeError as e:
-            raise ValueError(f"scores_var 是字符串，但不是合法 JSON（修正后仍无法解析）：{e}")
-    elif isinstance(scores_var, dict):
-        data = scores_var
-    else:
-        raise TypeError(f"scores_var 必须是 dict 或 str，但你传入的是：{type(scores_var)}")
-
-    # 2) 进入 scores 子层
-    score_dict = data.get("scores", {})
-    if not isinstance(score_dict, dict):
-        raise ValueError("data['scores'] 不是 dict，数据结构不符合预期")
-
-    # 3) 安全取分数
-    def get_score(factor_name: str) -> float:
-        item = score_dict.get(factor_name, {})
-        if isinstance(item, dict):
-            v = item.get("score", 0)
-        else:
-            # 防御性：万一你将来把 score 直接写成数字
-            v = item
-
-        try:
-            return float(v)
-        except (TypeError, ValueError):
-            return 0.0
-
-    # 4) 计算
-    top = (get_score("优雅性") + get_score("辨识度")) / 2
-    mid = (get_score("协调性") + get_score("饱和度")) / 2
-    base = (get_score("持久性") + get_score("苦涩度")) / 2
+    top  = (s["优雅性"]["score"] + s["辨识度"]["score"]) / 2
+    mid  = (s["协调性"]["score"] + s["饱和度"]["score"]) / 2
+    base = (s["持久性"]["score"] + s["苦涩度"]["score"]) / 2
 
     return top, mid, base
-
 
 # 风味形态图
 def plot_flavor_shape(scores_data):
@@ -2143,6 +2107,7 @@ with tab1:
             with open(PATHS['prompt'], 'w') as f: json.dump(new_cfg, f, ensure_ascii=False)
 
             st.success("Prompt 已保存！"); time.sleep(1); st.rerun()
+
 
 
 
