@@ -1564,7 +1564,7 @@ with tab1:
             st.caption("三段风味形态 (Flavor Shape)")
             # 绘制形态图
             fig_shape = plot_flavor_shape(scores)
-            st.pyplot(fig_shape, use_container_width=True)
+            st.pyplot(fig_shape, use_container_width=False)
 
         # 完整的校准和保存区域
         with st.expander("📝 校准评分结果并保存到判例库", expanded=True):
@@ -2112,6 +2112,7 @@ with tab1:
             with open(PATHS['prompt'], 'w') as f: json.dump(new_cfg, f, ensure_ascii=False)
 
             st.success("Prompt 已保存！"); time.sleep(1); st.rerun()
+
 
 
 
