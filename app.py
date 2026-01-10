@@ -1313,7 +1313,7 @@ def calculate_section_scores(scores):
     """
     # 辅助函数：安全获取分数，默认为 0
     def get(key):
-        return float(scores.get(key, 0))
+        return float(scores[key]["score"])
 
     top = (get('优雅性') + get('辨识度')) / 2
     mid = (get('协调性') + get('饱和度')) / 2
@@ -1557,14 +1557,14 @@ with tab1:
                     st.markdown(f"""<div class="factor-card"><div class="score-header"><span>{fname}</span><span>{data.get('score')}/9</span></div><div style="margin:5px 0; font-size:0.9em;">{data.get('comment')}</div><div class="advice-tag">💡 {data.get('suggestion','')}</div></div>""", unsafe_allow_html=True)
         
         st.subheader("📊 风味可视化")
-        
+
         # 创建布局：形态图
         vis_col2 = st.columns(1) [0]
         with vis_col2:
             st.caption("三段风味形态 (Flavor Shape)")
             # 绘制形态图
             fig_shape = plot_flavor_shape(scores)
-            st.pyplot(fig_shape, use_container_width=False)
+            st.pyplot(fig_shape, use_container_width=True)
 
         # 完整的校准和保存区域
         with st.expander("📝 校准评分结果并保存到判例库", expanded=True):
@@ -2112,6 +2112,8 @@ with tab1:
             with open(PATHS['prompt'], 'w') as f: json.dump(new_cfg, f, ensure_ascii=False)
 
             st.success("Prompt 已保存！"); time.sleep(1); st.rerun()
+
+
 
 
 
