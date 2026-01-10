@@ -1199,17 +1199,17 @@ SEED_CASES = [
 # ==========================================
 
 # 最核心的评分函数；流程：用户文本 → 向量检索 → RAG + 判例拼 Prompt → 调用模型 → 解析 JSON
-def run_scoring(text, kb_res, case_res, prompt_cfg, embedder, client, model_id): # 输入：茶评、知识库、案例库、prompt配置等
+def run_scoring(text, kb_res, case_res, prompt_cfg, embedder, client, model_id, k_num = 3, c_num = 2): # 输入：茶评、知识库、案例库、prompt配置等
     vec = embedder.encode([text]) # 文本通过阿里云embedder转为向量
     ctx_txt, hits = "（无手册资料）", [] # RAG初始
     if kb_res[0].ntotal > 0: # 如果RAG非空，找到最相似的3个片段
-        _, idx = kb_res[0].search(vec, 3)
+        _, idx = kb_res[0].search(vec, k_num)
         hits = [kb_res[1][i] for i in idx[0] if i < len(kb_res[1])]
         ctx_txt = "\n".join([f"- {h[:200]}..." for h in hits])
         
     case_txt, found_cases = "（无相似判例）", [] # 判例初始
     if case_res[0].ntotal > 0: # 如果判例库非空，找到最相似的2个片段
-        _, idx = case_res[0].search(vec, 2)
+        _, idx = case_res[0].search(vec, c_num)
         for i in idx[0]:
             if i < len(case_res[1]) and i >= 0:
                 c = case_res[1][i]
@@ -1309,7 +1309,6 @@ def bootstrap_seed_cases_if_empty(embedder):
 
 def calculate_section_scores(scores):
     s = scores["scores"]   # ← 就这一行是关键
-
     top  = (s["优雅性"]["score"] + s["辨识度"]["score"]) / 2
     mid  = (s["协调性"]["score"] + s["饱和度"]["score"]) / 2
     base = (s["持久性"]["score"] + s["苦涩度"]["score"]) / 2
@@ -1498,6 +1497,9 @@ tab1, tab2, tab3 = st.tabs(["💡 交互评分", "🚀 批量评分", "🛠️ �
 with tab1:
     st.info("AI 将参考知识库与判例库进行评分。确认结果后将自动更新 RAG 库。")
     
+    r_num = st.number_input("参考知识库条目数量", min_value=1, max_value=20, value=3, step=1)
+    c_num = st.number_input("参考判例库条目数量", min_value=1, max_value=20, value=2, step=1)
+
     # 使用会话状态存储用户输入，避免刷新后丢失
     if 'current_user_input' not in st.session_state:
         st.session_state.current_user_input = ""
@@ -1523,7 +1525,7 @@ with tab1:
             with st.spinner(f"正在使用模型 {model_id} 品鉴..."):
                 scores, kb_hits, case_hits = run_scoring(
                     user_input, st.session_state.kb, st.session_state.cases,
-                    st.session_state.prompt_config, embedder, client, model_id
+                    st.session_state.prompt_config, embedder, client, model_id, r_num, c_num
                 )
                 if scores:
                     # 保存评分结果到会话状态
@@ -1739,6 +1741,8 @@ with tab1:
     # --- Tab 2: 批量评分 ---
     with tab2:
         up_file = st.file_uploader("上传文件 (支持 .txt / .docx)", type=['txt','docx'])
+        r_num = st.number_input("参考知识库条目数量", min_value=1, max_value=20, value=3, step=1)
+        c_num = st.number_input("参考判例库条目数量", min_value=1, max_value=20, value=2, step=1)
         if up_file and st.button("开始批量处理"):
             if not client: st.error("请配置 Key")
             else:
@@ -1747,7 +1751,7 @@ with tab1:
                 results = []
                 bar = st.progress(0)
                 for i, line in enumerate(lines):
-                    s, _, _ = run_scoring(line, st.session_state.kb, st.session_state.cases, st.session_state.prompt_config, embedder, client, model_id)
+                    s, _, _ = run_scoring(line, st.session_state.kb, st.session_state.cases, st.session_state.prompt_config, embedder, client, model_id, r_num, c_num)
                     results.append({"id": i+1, "text": line, "scores": s})
                     bar.progress((i+1)/len(lines))
                 st.success("完成！")
@@ -2107,16 +2111,6 @@ with tab1:
             with open(PATHS['prompt'], 'w') as f: json.dump(new_cfg, f, ensure_ascii=False)
 
             st.success("Prompt 已保存！"); time.sleep(1); st.rerun()
-
-
-
-
-
-
-
-
-
-
 
 
 
