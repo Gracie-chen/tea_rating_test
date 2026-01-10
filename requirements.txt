@@ -8,3 +8,4 @@ PyPDF2
 Dashscope
 python-docx
 plotly
+matplotlib
