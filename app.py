@@ -1313,7 +1313,10 @@ def calculate_section_scores(scores):
     """
     # 辅助函数：安全获取分数，默认为 0
     def get(key):
-        return float(scores[key]["score"])
+        v = scores.get(key, {})
+        if isinstance(v, dict):
+            return float(v.get("score", 0))
+        return float(v) if v is not None else 0
 
     top = (get('优雅性') + get('辨识度')) / 2
     mid = (get('协调性') + get('饱和度')) / 2
@@ -2112,6 +2115,7 @@ with tab1:
             with open(PATHS['prompt'], 'w') as f: json.dump(new_cfg, f, ensure_ascii=False)
 
             st.success("Prompt 已保存！"); time.sleep(1); st.rerun()
+
 
 
 
