@@ -1318,7 +1318,7 @@ def calculate_section_scores(scores):
         try:
             return float(score_dict.get(key, {}).get("score", 0))
         except (TypeError, ValueError):
-            return 0.0
+            return 9
 
     top = (get('优雅性') + get('辨识度')) / 2
     mid = (get('协调性') + get('饱和度')) / 2
@@ -2117,6 +2117,7 @@ with tab1:
             with open(PATHS['prompt'], 'w') as f: json.dump(new_cfg, f, ensure_ascii=False)
 
             st.success("Prompt 已保存！"); time.sleep(1); st.rerun()
+
 
 
 
