@@ -9,3 +9,4 @@ Dashscope
 python-docx
 plotly
 matplotlib
+scipy
