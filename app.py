@@ -72,7 +72,7 @@ DEFAULT_USER_TEMPLATE = """【待评分产品】
 【参考标准（知识库）】
 {context_text}
 
-【历史判例参考（案例库）】
+【相似判例得分参考（案例库）】
 {case_text}
 
 请严格输出以下JSON格式（不含Markdown）：
@@ -137,6 +137,7 @@ class ResourceManager:
             except: pass
         return faiss.IndexFlatL2(1024), []
 
+# 以下三个方法用于微调
     @staticmethod
     def append_to_finetune(case_text: str, scores: Dict, sys_prompt: str, user_tpl: str, master_comment: str = "（人工校准）") -> bool:
         """将判例写入微调数据集 (.jsonl)"""
@@ -199,7 +200,8 @@ def run_scoring(text: str, kb_res: Tuple, case_res: Tuple, prompt_cfg: Dict, emb
         _, idx = kb_res[0].search(vec, k_num)
         hits = [kb_res[1][i] for i in idx[0] if i < len(kb_res[1])]
         ctx_txt = "\n".join([f"- {h[:200]}..." for h in hits])
-        
+
+    # 如果后续用Lora微调方法的话是否是考虑删除这一段few-shot    
     case_txt, found_cases = "（无相似判例）", []
     if case_res[0].ntotal > 0:
         _, idx = case_res[0].search(vec, c_num)
@@ -343,7 +345,7 @@ if'loaded' not in st.session_state:
     st.session_state.cases = (case_idx, case_data)
     
     # 2. 加载 Prompt 配置
-    # 优先读取持久化的 prompts.json，如果没有，则从 sys_p.txt 构建默认配置
+    # 优先读取持久化的 prompts.json，如果没有，则从 sys_p.txt 构建默认配置 - 实现prompts修改永久化
     if PATHS.prompt_config_file.exists():
         try:
             with open(PATHS.prompt_config_file, 'r') as f:
@@ -358,6 +360,7 @@ if'loaded' not in st.session_state:
             "user_template": DEFAULT_USER_TEMPLATE
         }
     
+
     st.session_state.loaded = True
 
 # B. 侧边栏
@@ -374,21 +377,23 @@ with st.sidebar:
         st.success("✅ API 就绪")
 
     st.markdown("---")
-    st.markdown(f"**模型：** `Qwen2.5-7B-Instruct`")
-    
+    st.markdown(f"**预处理模型：** `Deepseek-chat`")
+    st.markdown(f"**评分模型：** `Qwen2.5-7B-Instruct`")
+    model_id = "Qwen2.5-7B-Instruct"
+    # 加载微调模型（如有）
     ft_status = ResourceManager.load_ft_status()
     if ft_status and ft_status.get("status") == "succeeded":
         st.info(f"🎉 发现微调模型：`{ft_status.get('fine_tuned_model')}`")
 
     embedder = AliyunEmbedder(aliyun_key)
     client = OpenAI(api_key="dummy", base_url="http://117.50.89.74:8000/v1")
-    
     # 确保初始化判例
     bootstrap_seed_cases(embedder)
-
+    # 展示当前RAG与判例容量
     st.markdown("---")
     st.caption(f"知识库: {len(st.session_state.kb[1])} | 判例库: {len(st.session_state.cases[1])}")
-    
+    st.markdown("快速上传仅支持.zip文件格式，少量文件上传请至\"模型调优\"板块。")
+    # 
     if st.button("📤 导出数据"):
         import zipfile, shutil
         temp_dir = Path("./temp_export"); temp_dir.mkdir(exist_ok=True)
@@ -419,15 +424,15 @@ tab1, tab2, tab3 = st.tabs(["💡 交互评分", "🚀 批量评分", "🛠️ �
 
 # --- Tab 1: 交互评分 ---
 with tab1:
-    st.info("AI 将参考知识库与判例库进行评分。")
-    c1, c2, c3, c4 = st.columns([1, 3, 3, 1])
-    r_num = c2.number_input("参考RAG数量", 1, 20, 3, key="r1")
-    c_num = c3.number_input("参考判例数量", 1, 20, 2, key="c1")
-
+    st.info("将参考知识库与判例库进行评分。确认结果可一键更新判例库。")
+    c1, c2, c3, c4, c5 = st.columns([1, 3, 1, 3, 1])
+    r_num = c2.number_input("参考知识库条目数量", 1, 20, 3, key="r1")
+    c_num = c3.number_input("参考判例库条目数量", 1, 20, 2, key="c1")
+    # 使用会话状态存储用户输入，避免刷新后丢失
     if'current_user_input' not in st.session_state: st.session_state.current_user_input = ""
-    user_input = st.text_area("输入茶评:", value=st.session_state.current_user_input, height=120, key="ui")
+    user_input = st.text_area("请输入茶评描述:", value=st.session_state.current_user_input, height=150, key="ui")
     st.session_state.current_user_input = user_input
-    
+    # 使用会话状态存储评分结果
     if'last_scores' not in st.session_state: 
         st.session_state.last_scores = None
         st.session_state.last_master_comment = ""
@@ -435,7 +440,7 @@ with tab1:
     if st.button("开始评分", type="primary", use_container_width=True):
         if not user_input: st.warning("请输入内容")
         else:
-            with st.spinner("品鉴中..."):
+            with st.spinner(f"正在使用 {model_id} 品鉴..."):
                 scores, kb_h, case_h = run_scoring(user_input, st.session_state.kb, st.session_state.cases, st.session_state.prompt_config, embedder, client, "Qwen2.5-7B-Instruct", r_num, c_num)
                 if scores:
                     st.session_state.last_scores = scores
@@ -446,7 +451,7 @@ with tab1:
         s = st.session_state.last_scores["scores"]
         mc = st.session_state.last_master_comment
         st.markdown(f'<div class="master-comment"><b>👵 宗师总评：</b><br>{mc}</div>', unsafe_allow_html=True)
-        
+        # 展示评分结果
         cols = st.columns(3)
         factors = ["优雅性", "辨识度", "协调性", "饱和度", "持久性", "苦涩度"]
         for i, f in enumerate(factors):
@@ -455,38 +460,40 @@ with tab1:
                 with cols[i%3]:
                     st.markdown(f"""<div class="factor-card"><div class="score-header"><span>{f}</span><span>{d['score']}/9</span></div><div>{d['comment']}</div><div class="advice-tag">💡 {d.get('suggestion','')}</div></div>""", unsafe_allow_html=True)
         
-        st.subheader("📊 风味形态")
-        st.pyplot(plot_flavor_shape(st.session_state.last_scores), use_container_width=True)
+        left_col, right_col = st.columns([3, 7]) 
+        with left_col:
+            st.subheader("📊 风味形态")
+            st.pyplot(plot_flavor_shape(st.session_state.last_scores), use_container_width=True)
+        with right_col:
+            with st.expander("📝 校准与保存", expanded=True):
+                if st.button("💾 仅保存原始评分"):
+                    nc = {"text": user_input, "scores": s, "tags": "交互-原始", "master_comment": mc, "created_at": time.strftime("%Y-%m-%d")}
+                    st.session_state.cases[1].append(nc)
+                    st.session_state.cases[0].add(embedder.encode([user_input]))
+                    ResourceManager.save(st.session_state.cases[0], st.session_state.cases[1], PATHS.case_index, PATHS.case_data, is_json=True)
+                    st.success("已保存"); st.rerun()
 
-        with st.expander("📝 校准与保存", expanded=True):
-            if st.button("💾 仅保存原始评分"):
-                nc = {"text": user_input, "scores": s, "tags": "交互-原始", "master_comment": mc, "created_at": time.strftime("%Y-%m-%d")}
-                st.session_state.cases[1].append(nc)
-                st.session_state.cases[0].add(embedder.encode([user_input]))
-                ResourceManager.save(st.session_state.cases[0], st.session_state.cases[1], PATHS.case_index, PATHS.case_data, is_json=True)
-                st.success("已保存"); st.rerun()
-
-            st.markdown("---")
-            st.markdown("**完整校准**")
-            cal_master = st.text_area("校准总评", mc)
-            cal_scores = {}
-            ftabs = st.tabs(factors)
-            for i, f in enumerate(factors):
-                with ftabs[i]:
-                    if f in s:
-                        cal_scores[f] = {
-                            "score": st.slider("分数",0,9,int(s[f]['score']), key=f"s_{f}"),
-                            "comment": st.text_area("评语", s[f]['comment'], key=f"c_{f}"),
-                            "suggestion": st.text_area("建议", s[f].get('suggestion',''), key=f"sg_{f}")
-                        }
-            
-            if st.button("💾 保存校准评分"):
-                nc = {"text": user_input, "scores": cal_scores, "tags": "交互-校准", "master_comment": cal_master, "created_at": time.strftime("%Y-%m-%d")}
-                st.session_state.cases[1].append(nc)
-                st.session_state.cases[0].add(embedder.encode([user_input]))
-                ResourceManager.save(st.session_state.cases[0], st.session_state.cases[1], PATHS.case_index, PATHS.case_data, is_json=True)
-                ResourceManager.append_to_finetune(user_input, cal_scores, st.session_state.prompt_config['system_template'], st.session_state.prompt_config['user_template'], cal_master)
-                st.success("校准已保存"); st.rerun()
+                st.markdown("---")
+                st.markdown("**完整校准**")
+                cal_master = st.text_area("校准总评", mc)
+                cal_scores = {}
+                ftabs = st.tabs(factors)
+                for i, f in enumerate(factors):
+                    with ftabs[i]:
+                        if f in s:
+                            cal_scores[f] = {
+                                "score": st.slider("分数",0,9,int(s[f]['score']), key=f"s_{f}"),
+                                "comment": st.text_area("评语", s[f]['comment'], key=f"c_{f}"),
+                                "suggestion": st.text_area("建议", s[f].get('suggestion',''), key=f"sg_{f}")
+                            }
+                
+                if st.button("💾 保存校准评分"):
+                    nc = {"text": user_input, "scores": cal_scores, "tags": "交互-校准", "master_comment": cal_master, "created_at": time.strftime("%Y-%m-%d")}
+                    st.session_state.cases[1].append(nc)
+                    st.session_state.cases[0].add(embedder.encode([user_input]))
+                    ResourceManager.save(st.session_state.cases[0], st.session_state.cases[1], PATHS.case_index, PATHS.case_data, is_json=True)
+                    ResourceManager.append_to_finetune(user_input, cal_scores, st.session_state.prompt_config['system_template'], st.session_state.prompt_config['user_template'], cal_master)
+                    st.success("校准已保存"); st.rerun()
 
 # --- Tab 2: 批量评分 ---
 with tab2:
@@ -581,7 +588,7 @@ with tab3:
                         
                         st.success("已保存！")
                         time.sleep(1); st.rerun()
-
+    
     with c3:
         st.subheader("📝 Prompt 配置")
         pc = st.session_state.prompt_config
@@ -597,4 +604,3 @@ with tab3:
             with open(PATHS.prompt_config_file, 'w', encoding='utf-8') as f:
                 json.dump(new_cfg, f, ensure_ascii=False, indent=2)
             st.success("Prompt 已更新并保存到 prompts.json")
-
