@@ -466,35 +466,23 @@ with tab1:
                     with cols[i%2]:
                         st.markdown(f"""<div class="factor-card"><div class="score-header"><span>{f}</span><span>{d['score']}/9</span></div><div>{d['comment']}</div><div class="advice-tag">💡 {d.get('suggestion','')}</div></div>""", unsafe_allow_html=True)
         
-        ''' 这个方法略显多余
-        st.subheader("📝 得分校准与保存")
-        if st.button("💾 评分准确！一键保存！"):
-            nc = {"text": user_input, "scores": s, "tags": "交互-原始", "master_comment": mc, "created_at": time.strftime("%Y-%m-%d")}
-            st.session_state.cases[1].append(nc)
-            st.session_state.cases[0].add(embedder.encode([user_input]))
-            ResourceManager.save(st.session_state.cases[0], st.session_state.cases[1], PATHS.case_index, PATHS.case_data, is_json=True)
-            st.success("已保存"); st.rerun()
-        '''
         st.subheader("🛠️ 评分校准与修正")
-        cal_master = st.text_area("###### 校准总评", mc)
+        cal_master = st.text_area("校准总评", mc)
         cal_scores = {}
-        st.write("###### 分项调整") # 加个小标题提示
+        st.write("分项调整") # 加个小标题提示
         active_factors = [f for f in factors if f in s]
         grid_cols = st.columns(3) 
         for i, f in enumerate(active_factors):
             with grid_cols[i % 3]:
                 with st.container(border=True):
-                    t_col, s_col = st.columns([2, 1])
+                    t_col, s_col = st.columns([1, 1])
                     with t_col:
                         st.markdown(f"<div style='padding-top: 5px;'><b>📌 {f}</b></div>", unsafe_allow_html=True)
                     with s_col:
-                        new_score = st.number_input("分数", 0, 9, int(s[f]['score']), 1, key=f"s_{f}")
-                    
-                    # --- 下方：评语与建议 ---
-                    # height=68 保持紧凑
+                        new_score = st.number_input("分数", 0, 9, int(s[f]['score']), 1, key=f"s_{f}", label_visibility="collapsed")
                     cal_scores[f] = {
                         "score": new_score,
-                        "comment": st.text_area(f"评语", s[f]['comment'], key=f"c_{f}", height=68, placeholder="评语"),
+                        "comment": st.text_area(f"评语", s[f]['comment'], key=f"c_{f}", height=80, placeholder="评语"),
                         "suggestion": st.text_area(f"建议", s[f].get('suggestion',''), key=f"sg_{f}", height=68, placeholder="建议")
                     }
         
@@ -615,3 +603,14 @@ with tab3:
             with open(PATHS.prompt_config_file, 'w', encoding='utf-8') as f:
                 json.dump(new_cfg, f, ensure_ascii=False, indent=2)
             st.success("Prompt 已更新并保存到 prompts.json")
+
+
+''' 这个方法略显多余 原放在        st.subheader("🛠️ 评分校准与修正")  这行之前的段落
+st.subheader("📝 得分校准与保存")
+if st.button("💾 评分准确！一键保存！"):
+    nc = {"text": user_input, "scores": s, "tags": "交互-原始", "master_comment": mc, "created_at": time.strftime("%Y-%m-%d")}
+    st.session_state.cases[1].append(nc)
+    st.session_state.cases[0].add(embedder.encode([user_input]))
+    ResourceManager.save(st.session_state.cases[0], st.session_state.cases[1], PATHS.case_index, PATHS.case_data, is_json=True)
+    st.success("已保存"); st.rerun()
+'''
