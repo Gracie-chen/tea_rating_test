@@ -453,7 +453,7 @@ with tab1:
         mc = st.session_state.last_master_comment
         st.markdown(f'<div class="master-comment"><b>👵 宗师总评：</b><br>{mc}</div>', unsafe_allow_html=True)
         # 展示评分结果（包含可视化）
-        left_col, right_col = st.columns([3, 7]) 
+        left_col, right_col = st.columns([35, 65]) 
         with left_col:
             st.subheader("📊 风味形态")
             st.pyplot(plot_flavor_shape(st.session_state.last_scores), use_container_width=True)
@@ -479,20 +479,41 @@ with tab1:
         cal_master = st.text_area("校准总评", mc)
         cal_scores = {}
         st.write("###### 分项调整") # 加个小标题提示
-        for f in factors:
-            if f in s:
-                # 使用 container(border=True) 形成卡片式布局，视觉更整洁
+        active_factors = [f for f in factors if f in s]
+        
+        # 2. 创建 3 列布局 (实现 3*N 网格)
+        # 如果你觉得在右侧半屏显示 3 列太挤，可以将下面的 3 改为 2
+        grid_cols = st.columns(3) 
+        
+        # 3. 遍历并填充
+        for i, f in enumerate(active_factors):
+            # i % 3 决定了当前卡片放在第几列 (0, 1, 2)
+            with grid_cols[i % 3]:
                 with st.container(border=True):
-                    # 标题与分数放在一起
-                    st.markdown(f"**📌 {f}**") 
+                    # --- 内部布局：标题左(3)，分数右(2) ---
+                    # 比例设置为 [3, 2] 或者 [2, 1]，让右边的分数框尽可能小
+                    t_col, s_col = st.columns([2, 1])
                     
+                    with t_col:
+                        # 垂直居中标题 (使用 markdown 的 padding 微调对齐)
+                        st.markdown(f"<div style='padding-top: 5px;'><b>📌 {f}</b></div>", unsafe_allow_html=True)
+                    
+                    with s_col:
+                        # 分数输入框
+                        new_score = st.number_input(
+                            "分数", 
+                            min_value=0, max_value=9, 
+                            value=int(s[f]['score']), step=1,
+                            key=f"s_{f}", 
+                            label_visibility="collapsed" # 隐藏标签
+                        )
+                    
+                    # --- 下方：评语与建议 ---
+                    # height=68 保持紧凑
                     cal_scores[f] = {
-                        # 将分数滑块放在最上方
-                        "score": st.number_input("分数", 0, 9, int(s[f]['score']), 1, key=f"s_{f}", label_visibility="collapsed"),
-                        # 评语和建议直接列在下方
-                        # height=68 约为两行的高度，节省空间，用户输入多时会自动滚动
-                        "comment": st.text_area(f"{f} 评语", s[f]['comment'], key=f"c_{f}", height=68),
-                        "suggestion": st.text_area(f"{f} 建议", s[f].get('suggestion',''), key=f"sg_{f}", height=68)
+                        "score": new_score,
+                        "comment": st.text_area(f"评语", s[f]['comment'], key=f"c_{f}", height=68, placeholder="评语"),
+                        "suggestion": st.text_area(f"建议", s[f].get('suggestion',''), key=f"sg_{f}", height=68, placeholder="建议")
                     }
         
         if st.button("💾 保存校准评分", type="primary"):
