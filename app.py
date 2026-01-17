@@ -552,18 +552,35 @@ with tab3:
                     st.rerun()
                 except: pass
 
-        with st.expander("手动录入判例"):
-            with st.form("manual_case"):
-                txt = st.text_area("描述")
-                in_s = {}
-                for f in factors:
-                    in_s[f] = {"score": st.number_input(f"{f}",0,9,7), "comment": st.text_input(f"{f}评语")}
+        with st.expander("➕ 添加精细判例"):
+            with st.form("case_form"):
+                f_txt = st.text_area("判例描述", height=80)
+                f_tag = st.text_input("标签", "人工录入")
+                st.markdown("**因子评分详情**")
+                fc1, fc2 = st.columns(2)
+                factors = ["优雅性", "辨识度", "协调性", "饱和度", "持久性", "苦涩度"]
+                input_scores = {}
+                for i, f in enumerate(factors):
+                    with (fc1 if i%2==0 else fc2):
+                        val = st.number_input(f"{f}分数", 0,9,7, key=f"s_{i}")
+                        cmt = st.text_input(f"{f}评语", key=f"c_{i}")
+                        sug = st.text_input(f"{f}建议", key=f"a_{i}")
+                        input_scores[f] = {"score": val, "comment": cmt, "suggestion": sug}
+                
                 if st.form_submit_button("保存"):
-                    nc = {"text": txt, "scores": in_s, "tags": "手动"}
-                    st.session_state.cases[1].append(nc)
-                    st.session_state.cases[0].add(embedder.encode([txt]))
-                    ResourceManager.save(st.session_state.cases[0], st.session_state.cases[1], PATHS.case_index, PATHS.case_data, is_json=True)
-                    st.success("已保存")
+                    if not embedder: st.error("需 API Key")
+                    else:
+                        new_c = {"text": f_txt, "tags": f_tag, "scores": input_scores}
+                        st.session_state.cases[1].append(new_c)
+                        vec = embedder.encode([f_txt])
+                        st.session_state.cases[0].add(vec)
+                        ResourceManager.save(st.session_state.cases[0], st.session_state.cases[1], PATHS['case_index'], PATHS['case_data'], is_json=True)
+                        
+                        sys_p = st.session_state.prompt_config['system_template']
+                        ResourceManager.append_to_finetune(f_txt, input_scores, sys_p, st.session_state.prompt_config['user_template'])
+                        
+                        st.success("已保存！")
+                        time.sleep(1); st.rerun()
 
     with c3:
         st.subheader("📝 Prompt 配置")
@@ -580,3 +597,4 @@ with tab3:
             with open(PATHS.prompt_config_file, 'w', encoding='utf-8') as f:
                 json.dump(new_cfg, f, ensure_ascii=False, indent=2)
             st.success("Prompt 已更新并保存到 prompts.json")
+
