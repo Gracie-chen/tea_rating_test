@@ -452,56 +452,56 @@ with tab1:
         s = st.session_state.last_scores["scores"]
         mc = st.session_state.last_master_comment
         st.markdown(f'<div class="master-comment"><b>👵 宗师总评：</b><br>{mc}</div>', unsafe_allow_html=True)
-        # 展示评分结果
-        cols = st.columns(3)
-        factors = ["优雅性", "辨识度", "协调性", "饱和度", "持久性", "苦涩度"]
-        for i, f in enumerate(factors):
-            if f in s:
-                d = s[f]
-                with cols[i%3]:
-                    st.markdown(f"""<div class="factor-card"><div class="score-header"><span>{f}</span><span>{d['score']}/9</span></div><div>{d['comment']}</div><div class="advice-tag">💡 {d.get('suggestion','')}</div></div>""", unsafe_allow_html=True)
-        
-        left_col, right_col = st.columns([2, 8]) 
+        # 展示评分结果（包含可视化）
+        left_col, right_col = st.columns([3, 7]) 
         with left_col:
             st.subheader("📊 风味形态")
             st.pyplot(plot_flavor_shape(st.session_state.last_scores), use_container_width=True)
         with right_col:
-            st.subheader("📝 得分校准与保存")
-            if st.button("💾 评分准确！一键保存！"):
-                nc = {"text": user_input, "scores": s, "tags": "交互-原始", "master_comment": mc, "created_at": time.strftime("%Y-%m-%d")}
-                st.session_state.cases[1].append(nc)
-                st.session_state.cases[0].add(embedder.encode([user_input]))
-                ResourceManager.save(st.session_state.cases[0], st.session_state.cases[1], PATHS.case_index, PATHS.case_data, is_json=True)
-                st.success("已保存"); st.rerun()
-
-            st.markdown("---")
-            st.subheader("🛠️ 评分有误！需要校准！")
-            cal_master = st.text_area("校准总评", mc)
-            cal_scores = {}
-            st.write("###### 分项调整") # 加个小标题提示
-            for f in factors:
+            cols = st.columns(2)
+            factors = ["优雅性", "辨识度", "协调性", "饱和度", "持久性", "苦涩度"]
+            for i, f in enumerate(factors):
                 if f in s:
-                    # 使用 container(border=True) 形成卡片式布局，视觉更整洁
-                    with st.container(border=True):
-                        # 标题与分数放在一起
-                        st.markdown(f"**📌 {f}**") 
-                        
-                        cal_scores[f] = {
-                            # 将分数滑块放在最上方
-                            "score": st.number_input("分数", 0, 9, int(s[f]['score']), 1, key=f"s_{f}", label_visibility="collapsed"),
-                            # 评语和建议直接列在下方
-                            # height=68 约为两行的高度，节省空间，用户输入多时会自动滚动
-                            "comment": st.text_area(f"{f} 评语", s[f]['comment'], key=f"c_{f}", height=68),
-                            "suggestion": st.text_area(f"{f} 建议", s[f].get('suggestion',''), key=f"sg_{f}", height=68)
-                        }
-            
-            if st.button("💾 保存校准评分", type="primary"):
-                nc = {"text": user_input, "scores": cal_scores, "tags": "交互-校准", "master_comment": cal_master, "created_at": time.strftime("%Y-%m-%d")}
-                st.session_state.cases[1].append(nc)
-                st.session_state.cases[0].add(embedder.encode([user_input]))
-                ResourceManager.save(st.session_state.cases[0], st.session_state.cases[1], PATHS.case_index, PATHS.case_data, is_json=True)
-                ResourceManager.append_to_finetune(user_input, cal_scores, st.session_state.prompt_config['system_template'], st.session_state.prompt_config['user_template'], cal_master)
-                st.success("校准已保存"); st.rerun()
+                    d = s[f]
+                    with cols[i%3]:
+                        st.markdown(f"""<div class="factor-card"><div class="score-header"><span>{f}</span><span>{d['score']}/9</span></div><div>{d['comment']}</div><div class="advice-tag">💡 {d.get('suggestion','')}</div></div>""", unsafe_allow_html=True)
+        
+        st.subheader("📝 得分校准与保存")
+        if st.button("💾 评分准确！一键保存！"):
+            nc = {"text": user_input, "scores": s, "tags": "交互-原始", "master_comment": mc, "created_at": time.strftime("%Y-%m-%d")}
+            st.session_state.cases[1].append(nc)
+            st.session_state.cases[0].add(embedder.encode([user_input]))
+            ResourceManager.save(st.session_state.cases[0], st.session_state.cases[1], PATHS.case_index, PATHS.case_data, is_json=True)
+            st.success("已保存"); st.rerun()
+
+        st.markdown("---")
+        st.subheader("🛠️ 评分有误！需要校准！")
+        cal_master = st.text_area("校准总评", mc)
+        cal_scores = {}
+        st.write("###### 分项调整") # 加个小标题提示
+        for f in factors:
+            if f in s:
+                # 使用 container(border=True) 形成卡片式布局，视觉更整洁
+                with st.container(border=True):
+                    # 标题与分数放在一起
+                    st.markdown(f"**📌 {f}**") 
+                    
+                    cal_scores[f] = {
+                        # 将分数滑块放在最上方
+                        "score": st.number_input("分数", 0, 9, int(s[f]['score']), 1, key=f"s_{f}", label_visibility="collapsed"),
+                        # 评语和建议直接列在下方
+                        # height=68 约为两行的高度，节省空间，用户输入多时会自动滚动
+                        "comment": st.text_area(f"{f} 评语", s[f]['comment'], key=f"c_{f}", height=68),
+                        "suggestion": st.text_area(f"{f} 建议", s[f].get('suggestion',''), key=f"sg_{f}", height=68)
+                    }
+        
+        if st.button("💾 保存校准评分", type="primary"):
+            nc = {"text": user_input, "scores": cal_scores, "tags": "交互-校准", "master_comment": cal_master, "created_at": time.strftime("%Y-%m-%d")}
+            st.session_state.cases[1].append(nc)
+            st.session_state.cases[0].add(embedder.encode([user_input]))
+            ResourceManager.save(st.session_state.cases[0], st.session_state.cases[1], PATHS.case_index, PATHS.case_data, is_json=True)
+            ResourceManager.append_to_finetune(user_input, cal_scores, st.session_state.prompt_config['system_template'], st.session_state.prompt_config['user_template'], cal_master)
+            st.success("校准已保存"); st.rerun()
 
 # --- Tab 2: 批量评分 ---
 with tab2:
