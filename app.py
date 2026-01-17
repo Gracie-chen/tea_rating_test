@@ -466,6 +466,7 @@ with tab1:
                     with cols[i%2]:
                         st.markdown(f"""<div class="factor-card"><div class="score-header"><span>{f}</span><span>{d['score']}/9</span></div><div>{d['comment']}</div><div class="advice-tag">💡 {d.get('suggestion','')}</div></div>""", unsafe_allow_html=True)
         
+        ''' 这个方法略显多余
         st.subheader("📝 得分校准与保存")
         if st.button("💾 评分准确！一键保存！"):
             nc = {"text": user_input, "scores": s, "tags": "交互-原始", "master_comment": mc, "created_at": time.strftime("%Y-%m-%d")}
@@ -473,40 +474,21 @@ with tab1:
             st.session_state.cases[0].add(embedder.encode([user_input]))
             ResourceManager.save(st.session_state.cases[0], st.session_state.cases[1], PATHS.case_index, PATHS.case_data, is_json=True)
             st.success("已保存"); st.rerun()
-
-        st.markdown("---")
-        st.subheader("🛠️ 评分有误！需要校准！")
-        cal_master = st.text_area("校准总评", mc)
+        '''
+        st.subheader("🛠️ 评分校准与修正")
+        cal_master = st.text_area("###### 校准总评", mc)
         cal_scores = {}
         st.write("###### 分项调整") # 加个小标题提示
         active_factors = [f for f in factors if f in s]
-        
-        # 2. 创建 3 列布局 (实现 3*N 网格)
-        # 如果你觉得在右侧半屏显示 3 列太挤，可以将下面的 3 改为 2
         grid_cols = st.columns(3) 
-        
-        # 3. 遍历并填充
         for i, f in enumerate(active_factors):
-            # i % 3 决定了当前卡片放在第几列 (0, 1, 2)
             with grid_cols[i % 3]:
                 with st.container(border=True):
-                    # --- 内部布局：标题左(3)，分数右(2) ---
-                    # 比例设置为 [3, 2] 或者 [2, 1]，让右边的分数框尽可能小
                     t_col, s_col = st.columns([2, 1])
-                    
                     with t_col:
-                        # 垂直居中标题 (使用 markdown 的 padding 微调对齐)
                         st.markdown(f"<div style='padding-top: 5px;'><b>📌 {f}</b></div>", unsafe_allow_html=True)
-                    
                     with s_col:
-                        # 分数输入框
-                        new_score = st.number_input(
-                            "分数", 
-                            min_value=0, max_value=9, 
-                            value=int(s[f]['score']), step=1,
-                            key=f"s_{f}", 
-                            label_visibility="collapsed" # 隐藏标签
-                        )
+                        new_score = st.number_input("分数", 0, 9, int(s[f]['score']), 1, key=f"s_{f}")
                     
                     # --- 下方：评语与建议 ---
                     # height=68 保持紧凑
