@@ -485,7 +485,7 @@ with tab1:
         if not user_input: st.warning("请输入内容")
         else:
             with st.spinner(f"正在使用 {model_id} 品鉴..."):
-                user_input = llm_normalize_user_input(user_input)
+                user_input = llm_normalize_user_input(user_input, client)
                 scores, kb_h, case_h = run_scoring(user_input, st.session_state.kb, st.session_state.cases, st.session_state.prompt_config, embedder, client, "Qwen2.5-7B-Instruct", r_num, c_num)
                 if scores:
                     st.session_state.last_scores = scores
@@ -548,7 +548,7 @@ with tab2:
         lines = [l.strip() for l in parse_file(f).split('\n') if len(l)>10]
         res, bar = [], st.progress(0)
         for i, l in enumerate(lines):
-            l = llm_normalize_user_input(l)
+            l = llm_normalize_user_input(l, client)
             s, _, _ = run_scoring(l, st.session_state.kb, st.session_state.cases, st.session_state.prompt_config, embedder, client, "Qwen2.5-7B-Instruct", r_n, c_n)
             res.append({"id":i+1, "text":l, "scores":s})
             bar.progress((i+1)/len(lines))
