@@ -6,6 +6,7 @@ import numpy as np
 import faiss
 import time
 import pickle
+from github import Github, GithubException 
 from pathlib import Path
 from io import BytesIO
 from typing import List, Dict, Any, Tuple, Optional
@@ -171,6 +172,66 @@ class ResourceManager:
             try: return json.load(open(PATHS.ft_status, 'r'))
             except: pass
         return None
+
+# ==========================================
+# [SECTION 1.5] Github 同步工具 (新增部分)
+# ==========================================
+
+class GithubSync:
+    """负责将数据同步回 Github 仓库"""
+    
+    @staticmethod
+    def push_json(file_path_in_repo: str, data_dict: Dict, commit_msg: str = "Update via Streamlit") -> bool:
+        """
+        推送 JSON 数据到 Github
+        :param file_path_in_repo: 仓库内的文件路径，例如 "tea_data/prompts.json"
+        :param data_dict: 要保存的字典数据
+        :param commit_msg: 提交信息
+        """
+        # 1. 获取 Secrets
+        token = st.secrets.get("GITHUB_TOKEN")
+        repo_name = st.secrets.get("GITHUB_REPO")
+        branch = st.secrets.get("GITHUB_BRANCH", "main")
+        
+        if not token or not repo_name:
+            st.error("❌ 未配置 Github Token 或 仓库名 (GITHUB_TOKEN / GITHUB_REPO)")
+            return False
+
+        try:
+            # 2. 连接 Github
+            g = Github(token)
+            repo = g.get_repo(repo_name)
+            
+            # 格式化 JSON
+            content_str = json.dumps(data_dict, ensure_ascii=False, indent=2)
+            
+            # 3. 获取或创建文件
+            try:
+                # 尝试获取现有文件（为了拿到 sha 哈希值）
+                contents = repo.get_contents(file_path_in_repo, ref=branch)
+                repo.update_file(
+                    path=contents.path,
+                    message=commit_msg,
+                    content=content_str,
+                    sha=contents.sha,
+                    branch=branch
+                )
+            except GithubException as e:
+                # 如果文件不存在 (404)，则创建
+                if e.status == 404:
+                    repo.create_file(
+                        path=file_path_in_repo,
+                        message=f"Create {file_path_in_repo}",
+                        content=content_str,
+                        branch=branch
+                    )
+                else:
+                    raise e
+            return True
+
+        except Exception as e:
+            st.error(f"Github 同步失败: {str(e)}")
+            return False
 
 # ==========================================
 # [SECTION 2] AI 服务 (Embedding & LLM)
@@ -596,16 +657,12 @@ with tab3:
                         sug = st.text_input(f"{f}建议", key=f"a_{i}")
                         input_scores[f] = {"score": val, "comment": cmt, "suggestion": sug}
                 
-                if st.form_submit_button("保存并加入训练集"):
+                if st.form_submit_button("保存判例"):
                     new_c = {"text": f_txt, "tags": f_tag, "scores": input_scores}
                     st.session_state.cases[1].append(new_c)
                     vec = embedder.encode([f_txt])
                     st.session_state.cases[0].add(vec)
                     ResourceManager.save(st.session_state.cases[0], st.session_state.cases[1], PATHS.case_index, PATHS.case_data, is_json=True)
-                    
-                    # 同时写入训练文件
-                    ResourceManager.append_to_finetune(f_txt, input_scores, st.session_state.prompt_config['system_template'], st.session_state.prompt_config['user_template'])
-                    
                     st.success("已保存！")
                     time.sleep(1); st.rerun()
 
@@ -699,11 +756,26 @@ with tab4:
     st.markdown("用户提示词**不可修改**。其保证了发送内容与回答内容的基本结构，因此大语言模型的回答可被准确解析。")
     user_t = st.text_area("用户提示词", pc.get('user_template',''), height=250, disabled=True)
     
-    if st.button("保存 Prompt 到文件"):
-        new_cfg = {"system_template": sys_t, "user_template": user_t}
-        st.session_state.prompt_config = new_cfg
-        with open(PATHS.prompt_config_file, 'w', encoding='utf-8') as f:
-            json.dump(new_cfg, f, ensure_ascii=False, indent=2)
-        st.success("Prompt 已更新并保存到 prompts.json")
+    if st.button("💾 保存（永久化同步）", type="primary"):
+        if sys_t == pc.get('system_template'):
+            st.info("内容没有变化，无需保存。")
+        else:
+            new_cfg = {"system_template": sys_t, "user_template": user_t}
+            
+            with st.spinner("正在连接 Github 仓库并写入数据..."):
+                # === 这里直接调用我们在前面定义的静态方法 ===
+                # 注意：第一个参数是你在 Github 仓库里的相对路径
+                success = GithubSync.push_json(
+                    file_path_in_repo="tea_data/prompts.json", 
+                    data_dict=new_cfg,
+                    commit_msg="Update prompts.json from App"
+                )
+            
+            if success:
+                st.success("✅ 成功写入 Github！App 将在几秒后自动刷新。")
+                # 更新 Session 和 本地临时文件
+                st.session_state.prompt_config = new_cfg
+                with open(PATHS.prompt_config_file, 'w', encoding='utf-8') as f:
+                    json.dump(new_cfg, f, ensure_ascii=False, indent=2)
 
 
