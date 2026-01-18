@@ -433,7 +433,7 @@ with st.sidebar:
 st.markdown('<div class="main-title">🍵 茶品六因子 AI 评分器 Pro</div>', unsafe_allow_html=True)
 st.markdown('<div class="slogan">“一片叶子落入水中，改变了水的味道...”</div>', unsafe_allow_html=True)
 
-tab1, tab2, tab3, tab4 = st.tabs(["💡 交互评分", "🚀 批量评分", "🛠️ 模型调优", "📲 提示词配置"])
+tab1, tab2, tab3, tab4 = st.tabs(["💡 交互评分", "🚀 批量评分", "🛠️ 模型调优", "📲 提示词（Prompt）配置"])
 
 # --- Tab 1: 交互评分 ---
 with tab1:
@@ -603,10 +603,10 @@ with tab3:
 with tab4:
     st.subheader("📝 Prompt 配置")
     pc = st.session_state.prompt_config
-    st.markdown("系统提示词可以修改。完整全面的提示词会让大语言模型返回的更准确结果。")    
-    sys_t = st.text_area("系统提示词", pc.get('system_template',''), height=400)
-    st.markdown("用户提示词不可修改。其保证了发送内容与回答内容的基本结构，因此大语言模型的回答可被准确解析。")
-    user_t = st.text_area("用户提示词", pc.get('user_template',''), height=300, disabled=True)
+    st.markdown("系统提示词**可以修改**。完整全面的提示词会让大语言模型返回的更准确结果。")    
+    sys_t = st.text_area("系统提示词", pc.get('system_template',''), height=350)
+    st.markdown("用户提示词**不可修改**。其保证了发送内容与回答内容的基本结构，因此大语言模型的回答可被准确解析。")
+    user_t = st.text_area("用户提示词", pc.get('user_template',''), height=250, disabled=True)
     
     if st.button("保存 Prompt 到文件"):
         new_cfg = {"system_template": sys_t, "user_template": user_t}
