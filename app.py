@@ -601,7 +601,6 @@ with tab3:
                         time.sleep(1); st.rerun()
     
 with tab4:
-    st.subheader("📝 Prompt 配置")
     pc = st.session_state.prompt_config
     st.markdown("系统提示词**可以修改**。完整全面的提示词会让大语言模型返回的更准确结果。")    
     sys_t = st.text_area("系统提示词", pc.get('system_template',''), height=350)
