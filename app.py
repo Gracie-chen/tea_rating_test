@@ -1,15 +1,3 @@
-''' 
-删去的代码：
-这个方法略显多余 原放在        st.subheader("🛠️ 评分校准与修正")  这行之前的段落
-st.subheader("📝 得分校准与保存")
-if st.button("💾 评分准确！一键保存！"):
-    nc = {"text": user_input, "scores": s, "tags": "交互-原始", "master_comment": mc, "created_at": time.strftime("%Y-%m-%d")}
-    st.session_state.cases[1].append(nc)
-    st.session_state.cases[0].add(embedder.encode([user_input]))
-    ResourceManager.save(st.session_state.cases[0], st.session_state.cases[1], PATHS.case_index, PATHS.case_data, is_json=True)
-    st.success("已保存"); st.rerun()
-'''
-
 import streamlit as st
 import os
 import json
@@ -202,6 +190,48 @@ class AliyunEmbedder:
                 return np.array([i['embedding'] for i in resp.output['embeddings']]).astype("float32")
         except: pass
         return np.zeros((len(texts), 1024), dtype="float32")
+
+def llm_normalize_user_input(raw_query: str, client: OpenAI) -> str:
+    """
+    使用 LLM 对用户输入做语义规范化 / 去噪
+    不涉及总体prompt 修改
+    """
+    system_prompt = (
+        """
+          A. 角色与目标
+          你是“茶评清洗器”。你的任务是从输入文本中提取并输出只与茶评相关的信息，删除无关内容，保持原意与原有表述风格，只能删减不能修改。
+          B. 什么算“相关信息”（保留）
+          仅保留与以下内容有关的句子/短语：
+          茶的基本信息：茶名/品类、产地、年份、工艺、等级、原料、香型等
+          干茶/茶汤/叶底：外观、色泽、条索、汤色、叶底描述
+          香气与滋味：香气类型、强弱、层次、回甘、生津、涩感、苦感、甜度、醇厚度、喉韵、体感等
+          冲泡信息与表现：器具、投茶量、水温、时间、出汤、几泡变化、耐泡度、适饮建议
+          主观评价与结论：好喝/一般/缺点/性价比
+          C. 什么算“无关信息”（删除）
+          删除与茶评无直接关系的内容，例如：
+          与茶无关的生活日常、情绪宣泄、社交聊天、段子
+          店铺/物流/客服/包装破损/发货慢（除非“包装异味影响茶”这类直接影响品饮）
+          广告、价格链接、优惠券、引流话术、品牌吹水（除非是“性价比”且与品饮结论相关）
+          与其它产品/话题无关的对比闲聊
+          凑字数内容
+          D. 输出格式
+          只输出清洗后的茶评正文，不要解释、不加标题、不输出“删除了什么”
+          如果输入中没有任何茶评相关信息，则输出："无相关茶评信息"
+          E. 操作原则
+          尽量保留原句；只做删除/少量拼接
+          不要补充不存在的细节，不要推测        
+          """
+    )
+
+    resp = client.chat.completions.create(
+        model="deepseek-chat",
+        temperature=0,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": raw_query}
+        ]
+    )
+    return resp.choices[0].message.content.strip()
 
 def run_scoring(text: str, kb_res: Tuple, case_res: Tuple, prompt_cfg: Dict, embedder: AliyunEmbedder, client: OpenAI, model_id: str, k_num: int, c_num: int):
     """执行 RAG 检索与 LLM 评分"""
@@ -455,6 +485,7 @@ with tab1:
         if not user_input: st.warning("请输入内容")
         else:
             with st.spinner(f"正在使用 {model_id} 品鉴..."):
+                user_input = llm_normalize_user_input(user_input)
                 scores, kb_h, case_h = run_scoring(user_input, st.session_state.kb, st.session_state.cases, st.session_state.prompt_config, embedder, client, "Qwen2.5-7B-Instruct", r_num, c_num)
                 if scores:
                     st.session_state.last_scores = scores
@@ -517,6 +548,7 @@ with tab2:
         lines = [l.strip() for l in parse_file(f).split('\n') if len(l)>10]
         res, bar = [], st.progress(0)
         for i, l in enumerate(lines):
+            l = llm_normalize_user_input(l)
             s, _, _ = run_scoring(l, st.session_state.kb, st.session_state.cases, st.session_state.prompt_config, embedder, client, "Qwen2.5-7B-Instruct", r_n, c_n)
             res.append({"id":i+1, "text":l, "scores":s})
             bar.progress((i+1)/len(lines))
@@ -634,7 +666,7 @@ with tab3:
             time.sleep(1); st.rerun()
 
         st.markdown("#### 2. 启动训练")
-        st.caption("点击下方按钮将把数据上传至 GPU 服务器并开始训练。训练期间服务将中断约 20-30 分钟。")
+        st.caption("点击下方按钮将把数据上传至 GPU 服务器并开始训练。训练期间服务将中断约 2-5 分钟。")
 
         # 只有在服务器空闲且有数据时才允许点击
         btn_disabled = (server_status != "idle") or (data_count == 0)
