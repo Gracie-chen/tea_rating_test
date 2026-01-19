@@ -406,7 +406,9 @@ class GithubSync:
         从 GitHub 拉取 RAG 文件夹中的所有文件
         返回: [(文件名, 文件内容bytes), ...]
         
-        修复：对于大文件，GitHub API 不会直接返回 content，需要通过 download_url 下载
+        重要修复：
+        - 对于大文件(>1MB)，GitHub API 的 content.content 会是 None
+        - 需要通过 download_url 带认证头下载，或使用 git blob API
         """
         token, repo_name, branch = GithubSync._get_github_config()
         
@@ -421,29 +423,66 @@ class GithubSync:
             files = []
             try:
                 contents = repo.get_contents(rag_folder, ref=branch)
+                
                 for content in contents:
-                    if content.type == "file":
+                    if content.type != "file":
+                        continue
+                    
+                    file_content = None
+                    
+                    # 方法1: 小文件直接从 content.content 获取
+                    if content.content is not None:
                         try:
-                            # 方法1：尝试直接从 content.content 获取（小文件）
-                            if content.content is not None:
-                                file_content = base64.b64decode(content.content)
-                            # 方法2：通过 download_url 下载（大文件或 content 为空）
-                            elif content.download_url:
-                                response = requests.get(content.download_url, timeout=30)
-                                if response.status_code == 200:
-                                    file_content = response.content
-                                else:
-                                    print(f"[WARN] Failed to download {content.name}: HTTP {response.status_code}")
-                                    continue
-                            else:
-                                print(f"[WARN] Cannot get content for {content.name}")
-                                continue
-                            
-                            files.append((content.name, file_content))
-                            print(f"[INFO] Pulled RAG file: {content.name} ({len(file_content)} bytes)")
+                            file_content = base64.b64decode(content.content)
+                            print(f"[INFO] Loaded {content.name} via content.content ({len(file_content)} bytes)")
                         except Exception as e:
-                            print(f"[WARN] Failed to pull {content.name}: {e}")
-                            continue
+                            print(f"[WARN] Failed to decode {content.name}: {e}")
+                    
+                    # 方法2: 大文件通过 Git Blob API 获取
+                    if file_content is None and content.sha:
+                        try:
+                            blob = repo.get_git_blob(content.sha)
+                            if blob.encoding == "base64":
+                                file_content = base64.b64decode(blob.content)
+                                print(f"[INFO] Loaded {content.name} via git blob ({len(file_content)} bytes)")
+                        except Exception as e:
+                            print(f"[WARN] Failed to get blob for {content.name}: {e}")
+                    
+                    # 方法3: 通过 download_url 带认证头下载
+                    if file_content is None and content.download_url:
+                        try:
+                            headers = {
+                                "Authorization": f"token {token}",
+                                "Accept": "application/vnd.github.v3.raw"
+                            }
+                            response = requests.get(content.download_url, headers=headers, timeout=60)
+                            if response.status_code == 200:
+                                file_content = response.content
+                                print(f"[INFO] Loaded {content.name} via download_url ({len(file_content)} bytes)")
+                            else:
+                                print(f"[WARN] Failed to download {content.name}: HTTP {response.status_code}")
+                        except Exception as e:
+                            print(f"[WARN] Failed to download {content.name}: {e}")
+                    
+                    # 方法4: 使用 Raw URL 直接下载
+                    if file_content is None:
+                        try:
+                            # 构造 raw URL
+                            raw_url = f"https://raw.githubusercontent.com/{repo_name}/{branch}/{rag_folder}/{content.name}"
+                            headers = {"Authorization": f"token {token}"}
+                            response = requests.get(raw_url, headers=headers, timeout=60)
+                            if response.status_code == 200:
+                                file_content = response.content
+                                print(f"[INFO] Loaded {content.name} via raw URL ({len(file_content)} bytes)")
+                            else:
+                                print(f"[WARN] Failed to get raw {content.name}: HTTP {response.status_code}")
+                        except Exception as e:
+                            print(f"[WARN] Failed to get raw {content.name}: {e}")
+                    
+                    if file_content:
+                        files.append((content.name, file_content))
+                    else:
+                        print(f"[ERROR] Could not load {content.name} with any method")
                             
             except GithubException as e:
                 if e.status == 404:
@@ -451,10 +490,13 @@ class GithubSync:
                     return []
                 raise e
             
+            print(f"[INFO] Total loaded: {len(files)} files")
             return files
 
         except Exception as e:
             print(f"[ERROR] Pull RAG folder failed: {e}")
+            import traceback
+            traceback.print_exc()
             return []
 
 
@@ -569,16 +611,23 @@ def parse_file(uploaded_file) -> str:
 def parse_file_bytes(filename: str, content: bytes) -> str:
     """解析文件内容 (从bytes) - 用于从GitHub拉取的文件"""
     try:
-        if filename.endswith('.txt'):
+        if filename.lower().endswith('.txt'):
             return content.decode('utf-8')
-        elif filename.endswith('.pdf'):
+        elif filename.lower().endswith('.pdf'):
             reader = PdfReader(BytesIO(content))
-            return "".join([p.extract_text() or "" for p in reader.pages])
-        elif filename.endswith('.docx'):
+            text = ""
+            for page in reader.pages:
+                page_text = page.extract_text()
+                if page_text:
+                    text += page_text + "\n"
+            return text
+        elif filename.lower().endswith('.docx'):
             doc = Document(BytesIO(content))
             return "\n".join([p.text for p in doc.paragraphs])
     except Exception as e:
         print(f"[WARN] Failed to parse {filename}: {e}")
+        import traceback
+        traceback.print_exc()
     return ""
 
 def create_word_report(results: List[Dict]) -> BytesIO:
@@ -838,6 +887,7 @@ if 'loaded' not in st.session_state:
     
     # 2. 如果本地RAG为空，尝试从GitHub拉取
     if len(kb_data) == 0:
+        print("[INFO] Local KB is empty, trying to pull from GitHub...")
         try:
             # 先获取 API Key（需要用于向量化）
             temp_aliyun_key = os.getenv("ALIYUN_API_KEY") or st.secrets.get("ALIYUN_API_KEY", "")
@@ -846,20 +896,27 @@ if 'loaded' not in st.session_state:
                 rag_files = GithubSync.pull_rag_folder("tea_data/RAG")
                 
                 if rag_files:
+                    print(f"[INFO] Pulled {len(rag_files)} files from GitHub")
                     # 解析所有文件内容
                     all_text = ""
                     file_names = []
                     
                     for fname, fcontent in rag_files:
                         file_names.append(fname)
+                        print(f"[INFO] Parsing {fname} ({len(fcontent)} bytes)...")
                         # 使用统一的解析函数
                         parsed_text = parse_file_bytes(fname, fcontent)
                         if parsed_text:
                             all_text += parsed_text + "\n"
+                            print(f"[INFO] Parsed {fname}: {len(parsed_text)} chars")
+                        else:
+                            print(f"[WARN] No text extracted from {fname}")
                     
                     # 切片并构建索引
                     if all_text.strip():
+                        print(f"[INFO] Total text: {len(all_text)} chars")
                         chunks = [all_text[i:i+600] for i in range(0, len(all_text), 500)]
+                        print(f"[INFO] Created {len(chunks)} chunks")
                         
                         if chunks:
                             temp_embedder = AliyunEmbedder(temp_aliyun_key)
@@ -874,9 +931,17 @@ if 'loaded' not in st.session_state:
                             ResourceManager.save(kb_idx, chunks, PATHS.kb_index, PATHS.kb_chunks)
                             ResourceManager.save_kb_files(file_names)
                             
-                            print(f"[INFO] Auto-loaded {len(chunks)} chunks from {len(file_names)} RAG files")
+                            print(f"[INFO] Successfully loaded {len(chunks)} chunks from {len(file_names)} RAG files")
+                    else:
+                        print("[WARN] No text extracted from any RAG files")
+                else:
+                    print("[INFO] No RAG files found on GitHub")
+            else:
+                print("[WARN] No ALIYUN_API_KEY found, skip RAG loading")
         except Exception as e:
-            print(f"[WARN] Auto-load RAG from GitHub failed: {e}")
+            print(f"[ERROR] Auto-load RAG from GitHub failed: {e}")
+            import traceback
+            traceback.print_exc()
     
     # 3. 加载 Prompt 配置
     if PATHS.prompt_config_file.exists():
