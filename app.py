@@ -288,7 +288,11 @@ class GithubSync:
 
     @staticmethod
     def push_binary_file(file_path_in_repo: str, file_content: bytes, commit_msg: str = "Upload file") -> bool:
-        """推送二进制文件到 Github (如PDF, DOCX等)"""
+        """推送二进制文件到 Github (如PDF, DOCX等)
+        
+        重要：PyGithub的create_file/update_file接受bytes类型时会自动进行base64编码
+        不要手动编码，否则会导致双重编码！
+        """
         g, repo_name, branch = GithubSync._get_github_client()
         
         if not g or not repo_name:
@@ -297,14 +301,15 @@ class GithubSync:
 
         try:
             repo = g.get_repo(repo_name)
-            content_b64 = base64.b64encode(file_content).decode('utf-8')
+            # 注意：直接传bytes，PyGithub会自动base64编码
+            # 不要手动编码！否则会导致双重编码，文件损坏
             
             try:
                 contents = repo.get_contents(file_path_in_repo, ref=branch)
                 repo.update_file(
                     path=contents.path,
                     message=commit_msg,
-                    content=content_b64,
+                    content=file_content,  # 直接传bytes
                     sha=contents.sha,
                     branch=branch
                 )
@@ -313,7 +318,7 @@ class GithubSync:
                     repo.create_file(
                         path=file_path_in_repo,
                         message=f"Create {file_path_in_repo}",
-                        content=content_b64,
+                        content=file_content,  # 直接传bytes
                         branch=branch
                     )
                 else:
@@ -354,52 +359,80 @@ class GithubSync:
             return False
 
     @staticmethod
-    def sync_rag_folder(current_files: List[str], uploaded_files: List, rag_folder: str = "tea_data/RAG") -> bool:
+    def add_rag_files(uploaded_files: List, rag_folder: str = "tea_data/RAG") -> Tuple[bool, List[str]]:
         """
-        同步RAG文件夹到GitHub
-        - current_files: 当前应该存在的文件名列表
+        添加RAG文件到GitHub（只添加，不删除现有文件）
         - uploaded_files: Streamlit上传的文件对象列表
         - rag_folder: GitHub上的RAG文件夹路径
+        返回: (是否成功, 成功上传的文件名列表)
         """
         g, repo_name, branch = GithubSync._get_github_client()
         
         if not g or not repo_name:
             st.error("❌ 未配置 Github Token 或 仓库名")
-            return False
+            return False, []
 
         try:
-            repo = g.get_repo(repo_name)
-            
-            # 1. 获取GitHub上RAG文件夹中现有的文件
-            existing_files = []
-            try:
-                contents = repo.get_contents(rag_folder, ref=branch)
-                existing_files = [c.name for c in contents if c.type == "file"]
-            except GithubException as e:
-                if e.status != 404:
-                    raise e
-                # 404表示文件夹不存在，这是OK的
-            
-            # 2. 计算需要删除的文件（在GitHub上有但不在当前列表中）
-            files_to_delete = set(existing_files) - set(current_files)
-            
-            # 3. 删除多余的文件
-            for fname in files_to_delete:
-                file_path = f"{rag_folder}/{fname}"
-                GithubSync.delete_file(file_path, f"Delete RAG file: {fname}")
-            
-            # 4. 上传/更新当前的文件
+            uploaded_names = []
             for uf in uploaded_files:
                 file_path = f"{rag_folder}/{uf.name}"
                 uf.seek(0)
                 file_content = uf.read()
-                GithubSync.push_binary_file(file_path, file_content, f"Update RAG file: {uf.name}")
+                if GithubSync.push_binary_file(file_path, file_content, f"Add RAG file: {uf.name}"):
+                    uploaded_names.append(uf.name)
+                else:
+                    st.warning(f"⚠️ 上传 {uf.name} 失败")
             
-            return True
+            return len(uploaded_names) > 0, uploaded_names
 
         except Exception as e:
-            st.error(f"RAG同步失败: {str(e)}")
-            return False
+            st.error(f"RAG文件添加失败: {str(e)}")
+            return False, []
+
+    @staticmethod
+    def list_rag_files(rag_folder: str = "tea_data/RAG") -> List[str]:
+        """
+        获取GitHub上RAG文件夹中的所有文件名
+        返回: 文件名列表
+        """
+        g, repo_name, branch = GithubSync._get_github_client()
+        
+        if not g or not repo_name:
+            return []
+
+        try:
+            repo = g.get_repo(repo_name)
+            contents = repo.get_contents(rag_folder, ref=branch)
+            return [c.name for c in contents if c.type == "file"]
+        except GithubException as e:
+            if e.status == 404:
+                return []  # 文件夹不存在
+            print(f"[ERROR] 获取RAG文件列表失败: {e}")
+            return []
+        except Exception as e:
+            print(f"[ERROR] 获取RAG文件列表失败: {e}")
+            return []
+
+    @staticmethod
+    def delete_rag_file(filename: str, rag_folder: str = "tea_data/RAG") -> bool:
+        """
+        从GitHub删除单个RAG文件
+        - filename: 要删除的文件名
+        - rag_folder: GitHub上的RAG文件夹路径
+        返回: 是否成功
+        """
+        file_path = f"{rag_folder}/{filename}"
+        return GithubSync.delete_file(file_path, f"Delete RAG file: {filename}")
+
+    @staticmethod
+    def sync_rag_folder(current_files: List[str], uploaded_files: List, rag_folder: str = "tea_data/RAG") -> bool:
+        """
+        [已废弃] 原覆盖式同步方法，保留以兼容旧代码
+        建议使用 add_rag_files 和 delete_rag_file 代替
+        """
+        # 现在只执行添加操作，不删除现有文件
+        success, _ = GithubSync.add_rag_files(uploaded_files, rag_folder)
+        return success
 
     @staticmethod
     def sync_cases(cases: List[Dict], file_path: str = "tea_data/case.json") -> bool:
@@ -1381,42 +1414,145 @@ with tab3:
         st.subheader("📚 知识库 (RAG)")
         st.caption("上传PDF/文档以增强模型回答的准确性。文件将同步到GitHub。")
         
-        # 显示当前知识库文件
-        current_kb_files = st.session_state.get('kb_files', [])
-        if current_kb_files:
-            st.info(f"当前知识库文件：{', '.join(current_kb_files)}")
+        # ===== 显示GitHub上的RAG文件列表 =====
+        st.markdown("**📁 GitHub上的RAG文件：**")
         
-        up = st.file_uploader("上传资料", accept_multiple_files=True, key="kb_uploader", 
+        # 获取GitHub上的文件列表
+        if 'github_rag_files' not in st.session_state:
+            st.session_state.github_rag_files = []
+        
+        col_refresh, col_spacer = st.columns([1, 3])
+        with col_refresh:
+            if st.button("🔄 刷新列表", key="refresh_rag_list"):
+                with st.spinner("正在获取文件列表..."):
+                    st.session_state.github_rag_files = GithubSync.list_rag_files()
+                st.rerun()
+        
+        github_files = st.session_state.github_rag_files
+        if not github_files:
+            # 首次加载时尝试获取
+            github_files = GithubSync.list_rag_files()
+            st.session_state.github_rag_files = github_files
+        
+        if github_files:
+            st.info(f"共 {len(github_files)} 个文件")
+            
+            # 用于追踪需要删除的文件
+            if 'rag_files_to_delete' not in st.session_state:
+                st.session_state.rag_files_to_delete = set()
+            
+            # 显示文件列表，每个文件带删除按钮
+            for fname in github_files:
+                file_col, del_col = st.columns([5, 1])
+                with file_col:
+                    if fname in st.session_state.rag_files_to_delete:
+                        st.markdown(f"~~📄 {fname}~~ *(待删除)*")
+                    else:
+                        st.markdown(f"📄 {fname}")
+                with del_col:
+                    if fname not in st.session_state.rag_files_to_delete:
+                        if st.button("🗑️", key=f"del_rag_{fname}", help=f"删除 {fname}"):
+                            st.session_state.rag_files_to_delete.add(fname)
+                            st.rerun()
+                    else:
+                        if st.button("↩️", key=f"undo_rag_{fname}", help="撤销删除"):
+                            st.session_state.rag_files_to_delete.discard(fname)
+                            st.rerun()
+            
+            # 如果有待删除的文件，显示确认按钮
+            if st.session_state.rag_files_to_delete:
+                st.warning(f"⚠️ 将删除 {len(st.session_state.rag_files_to_delete)} 个文件")
+                del_col1, del_col2 = st.columns(2)
+                with del_col1:
+                    if st.button("✅ 确认删除", type="primary", key="confirm_del_rag"):
+                        with st.spinner("正在删除文件..."):
+                            deleted = []
+                            for fname in st.session_state.rag_files_to_delete:
+                                if GithubSync.delete_rag_file(fname):
+                                    deleted.append(fname)
+                            
+                            # 更新session state
+                            st.session_state.github_rag_files = [f for f in github_files if f not in deleted]
+                            
+                            # 更新本地知识库文件列表
+                            current_kb_files = st.session_state.get('kb_files', [])
+                            st.session_state.kb_files = [f for f in current_kb_files if f not in deleted]
+                            ResourceManager.save_kb_files(st.session_state.kb_files)
+                            
+                            st.session_state.rag_files_to_delete = set()
+                            st.success(f"✅ 已删除 {len(deleted)} 个文件")
+                            
+                            # 提示需要重建知识库
+                            st.info("💡 文件已从GitHub删除。如需更新本地知识库，请点击下方的'重建本地知识库'按钮。")
+                            time.sleep(1)
+                            st.rerun()
+                with del_col2:
+                    if st.button("❌ 取消", key="cancel_del_rag"):
+                        st.session_state.rag_files_to_delete = set()
+                        st.rerun()
+        else:
+            st.caption("暂无RAG文件")
+        
+        st.markdown("---")
+        
+        # ===== 上传新文件（添加模式） =====
+        st.markdown("**➕ 添加新文件：**")
+        up = st.file_uploader("选择文件", accept_multiple_files=True, key="kb_uploader", 
                               type=['pdf', 'txt', 'docx'])
         
-        if up and st.button("更新知识库并同步到GitHub"):
-            with st.spinner("正在切片与向量化..."):
+        if up and st.button("📤 添加到知识库", type="primary"):
+            # 检查是否有重名文件
+            new_names = [u.name for u in up]
+            existing_names = st.session_state.get('github_rag_files', [])
+            duplicate_names = set(new_names) & set(existing_names)
+            
+            if duplicate_names:
+                st.warning(f"⚠️ 以下文件已存在，将被覆盖：{', '.join(duplicate_names)}")
+            
+            with st.spinner("正在处理文件..."):
+                # 1. 解析文件内容
                 raw = "".join([parse_file(u) for u in up])
-                cks = [raw[i:i+600] for i in range(0, len(raw), 500)]
-                idx = faiss.IndexFlatL2(1024)
                 
-                if len(cks) > 0:
-                    idx.add(embedder.encode(cks))
-                    st.session_state.kb = (idx, cks)
-                    ResourceManager.save(idx, cks, PATHS.kb_index, PATHS.kb_chunks)
-                    
-                    # 保存文件列表
-                    file_names = [u.name for u in up]
-                    st.session_state.kb_files = file_names
-                    ResourceManager.save_kb_files(file_names)
-                    
-                    # 同步到GitHub
-                    with st.spinner("同步到GitHub..."):
-                        success = GithubSync.sync_rag_folder(file_names, up, "tea_data/RAG")
-                        if success:
-                            st.success(f"✅ 已更新 {len(cks)} 个知识片段，并同步到GitHub")
-                        else:
-                            st.warning(f"⚠️ 本地更新成功，但GitHub同步失败")
-                    
-                    time.sleep(1)
-                    st.rerun()
+                if not raw.strip():
+                    st.error("❌ 无法从上传的文件中提取有效文本")
                 else:
-                    st.warning("未提取到有效文本")
+                    # 2. 上传到GitHub
+                    with st.spinner("上传到GitHub..."):
+                        success, uploaded_names = GithubSync.add_rag_files(up, "tea_data/RAG")
+                    
+                    if success:
+                        # 3. 更新本地文件列表
+                        current_kb_files = st.session_state.get('kb_files', [])
+                        # 合并文件列表（去重）
+                        all_files = list(set(current_kb_files + uploaded_names))
+                        st.session_state.kb_files = all_files
+                        st.session_state.github_rag_files = list(set(existing_names + uploaded_names))
+                        ResourceManager.save_kb_files(all_files)
+                        
+                        st.success(f"✅ 已上传 {len(uploaded_names)} 个文件到GitHub")
+                        st.info("💡 请点击下方的'重建本地知识库'按钮以更新向量索引。")
+                        time.sleep(1)
+                        st.rerun()
+                    else:
+                        st.error("❌ 上传到GitHub失败")
+        
+        # ===== 重建本地知识库按钮 =====
+        st.markdown("---")
+        st.markdown("**🔧 知识库维护：**")
+        local_kb_count = len(st.session_state.kb[1])
+        st.caption(f"本地知识库：{local_kb_count} 个片段")
+        
+        if st.button("🔄 从GitHub重建本地知识库", use_container_width=True):
+            with st.spinner("正在从GitHub拉取并重建知识库..."):
+                success, msg = load_rag_from_github(aliyun_key)
+                if success:
+                    st.success(msg)
+                    # 更新GitHub文件列表
+                    st.session_state.github_rag_files = GithubSync.list_rag_files()
+                else:
+                    st.error(msg)
+            time.sleep(1)
+            st.rerun()
         
         st.divider()
         st.subheader("📕 判例库 (CASE)")
