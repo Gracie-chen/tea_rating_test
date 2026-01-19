@@ -865,6 +865,13 @@ with tab1:
                 if scores:
                     st.session_state.last_scores = scores
                     st.session_state.last_master_comment = scores.get("master_comment", "")
+                    
+                    # 清除校准输入框的缓存状态，确保显示新结果
+                    factors = ["优雅性", "辨识度", "协调性", "饱和度", "持久性", "苦涩度"]
+                    for f in factors:
+                        for key in [f"s_{f}", f"c_{f}", f"sg_{f}"]:
+                            if key in st.session_state:
+                                del st.session_state[key]
                     st.rerun()
     
     if st.session_state.last_scores:
@@ -1118,3 +1125,4 @@ with tab4:
                 st.session_state.prompt_config = new_cfg
                 with open(PATHS.prompt_config_file, 'w', encoding='utf-8') as f:
                     json.dump(new_cfg, f, ensure_ascii=False, indent=2)
+
