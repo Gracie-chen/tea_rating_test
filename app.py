@@ -1374,7 +1374,7 @@ with tab2:
 with tab3:
     st.subheader("📚 知识库 (RAG)")
     st.caption("上传PDF/文档以增强模型回答的准确性。文件将同步到云端。")
-    colu1, colu2 = st.columns(7,3)
+    colu1, colu2 = st.columns([7,3])
     with colu1:
         # ===== 显示GitHub上的RAG文件列表 =====
         st.markdown("**📁 云端上的RAG文件：**")
