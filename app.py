@@ -400,6 +400,41 @@ class GithubSync:
         """同步判例库到GitHub"""
         return GithubSync.push_json(file_path, cases, "Update case.json from App")
 
+    @staticmethod
+    def pull_rag_folder(rag_folder: str = "tea_data/RAG") -> List[Tuple[str, bytes]]:
+        """
+        从 GitHub 拉取 RAG 文件夹中的所有文件
+        返回: [(文件名, 文件内容bytes), ...]
+        """
+        token, repo_name, branch = GithubSync._get_github_config()
+        
+        if not token or not repo_name:
+            return []
+
+        try:
+            g = Github(token)
+            repo = g.get_repo(repo_name)
+            
+            files = []
+            try:
+                contents = repo.get_contents(rag_folder, ref=branch)
+                for content in contents:
+                    if content.type == "file":
+                        # 下载文件内容
+                        file_content = base64.b64decode(content.content)
+                        files.append((content.name, file_content))
+            except GithubException as e:
+                if e.status == 404:
+                    return []  # 文件夹不存在
+                raise e
+            
+            return files
+
+        except Exception as e:
+            print(f"[ERROR] Pull RAG folder failed: {e}")
+            return []
+
+
 # ==========================================
 # [SECTION 2] AI 服务 (Embedding & LLM)
 # ==========================================
@@ -1168,5 +1203,6 @@ with tab4:
                 st.session_state.prompt_config = new_cfg
                 with open(PATHS.prompt_config_file, 'w', encoding='utf-8') as f:
                     json.dump(new_cfg, f, ensure_ascii=False, indent=2)
+
 
 
