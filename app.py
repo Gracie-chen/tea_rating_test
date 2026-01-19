@@ -6,7 +6,7 @@ import numpy as np
 import faiss
 import time
 import pickle
-from github import Github, GithubException 
+from github import Github, GithubException, Auth  # 新增 Auth
 from pathlib import Path
 from io import BytesIO
 from typing import List, Dict, Any, Tuple, Optional
@@ -239,16 +239,25 @@ class GithubSync:
         return token, repo_name, branch
     
     @staticmethod
+    def _get_github_client():
+        """获取 GitHub 客户端（使用新的认证方式）"""
+        token, repo_name, branch = GithubSync._get_github_config()
+        if not token or not repo_name:
+            return None, None, None
+        # 使用新的认证方式，避免 DeprecationWarning
+        g = Github(auth=Auth.Token(token))
+        return g, repo_name, branch
+    
+    @staticmethod
     def push_json(file_path_in_repo: str, data_dict: Dict, commit_msg: str = "Update via Streamlit") -> bool:
         """推送 JSON 数据到 Github"""
-        token, repo_name, branch = GithubSync._get_github_config()
+        g, repo_name, branch = GithubSync._get_github_client()
         
-        if not token or not repo_name:
+        if not g or not repo_name:
             st.error("❌ 未配置 Github Token 或 仓库名 (GITHUB_TOKEN / GITHUB_REPO)")
             return False
 
         try:
-            g = Github(token)
             repo = g.get_repo(repo_name)
             content_str = json.dumps(data_dict, ensure_ascii=False, indent=2)
             
@@ -280,14 +289,13 @@ class GithubSync:
     @staticmethod
     def push_binary_file(file_path_in_repo: str, file_content: bytes, commit_msg: str = "Upload file") -> bool:
         """推送二进制文件到 Github (如PDF, DOCX等)"""
-        token, repo_name, branch = GithubSync._get_github_config()
+        g, repo_name, branch = GithubSync._get_github_client()
         
-        if not token or not repo_name:
+        if not g or not repo_name:
             st.error("❌ 未配置 Github Token 或 仓库名")
             return False
 
         try:
-            g = Github(token)
             repo = g.get_repo(repo_name)
             content_b64 = base64.b64encode(file_content).decode('utf-8')
             
@@ -319,13 +327,12 @@ class GithubSync:
     @staticmethod
     def delete_file(file_path_in_repo: str, commit_msg: str = "Delete file") -> bool:
         """从 Github 删除文件"""
-        token, repo_name, branch = GithubSync._get_github_config()
+        g, repo_name, branch = GithubSync._get_github_client()
         
-        if not token or not repo_name:
+        if not g or not repo_name:
             return False
 
         try:
-            g = Github(token)
             repo = g.get_repo(repo_name)
             
             try:
@@ -354,14 +361,13 @@ class GithubSync:
         - uploaded_files: Streamlit上传的文件对象列表
         - rag_folder: GitHub上的RAG文件夹路径
         """
-        token, repo_name, branch = GithubSync._get_github_config()
+        g, repo_name, branch = GithubSync._get_github_client()
         
-        if not token or not repo_name:
+        if not g or not repo_name:
             st.error("❌ 未配置 Github Token 或 仓库名")
             return False
 
         try:
-            g = Github(token)
             repo = g.get_repo(repo_name)
             
             # 1. 获取GitHub上RAG文件夹中现有的文件
@@ -408,7 +414,7 @@ class GithubSync:
         
         重要修复：
         - 对于大文件(>1MB)，GitHub API 的 content.content 会是 None
-        - 需要通过 download_url 带认证头下载，或使用 git blob API
+        - 需要通过 Git Blob API 或 download_url 带认证头下载
         """
         token, repo_name, branch = GithubSync._get_github_config()
         
@@ -417,48 +423,54 @@ class GithubSync:
             return []
 
         try:
-            g = Github(token)
+            g = Github(auth=Auth.Token(token))
             repo = g.get_repo(repo_name)
             
             files = []
             try:
+                print(f"[INFO] Getting contents of {rag_folder}...")
                 contents = repo.get_contents(rag_folder, ref=branch)
+                print(f"[INFO] Found {len(contents)} items in {rag_folder}")
                 
                 for content in contents:
                     if content.type != "file":
+                        print(f"[INFO] Skipping non-file: {content.name}")
                         continue
                     
+                    print(f"[INFO] Processing file: {content.name}, size: {content.size} bytes")
                     file_content = None
                     
                     # 方法1: 小文件直接从 content.content 获取
                     if content.content is not None:
                         try:
                             file_content = base64.b64decode(content.content)
-                            print(f"[INFO] Loaded {content.name} via content.content ({len(file_content)} bytes)")
+                            print(f"[INFO] ✓ Loaded {content.name} via content.content ({len(file_content)} bytes)")
                         except Exception as e:
                             print(f"[WARN] Failed to decode {content.name}: {e}")
                     
                     # 方法2: 大文件通过 Git Blob API 获取
                     if file_content is None and content.sha:
                         try:
+                            print(f"[INFO] Trying git blob for {content.name}...")
                             blob = repo.get_git_blob(content.sha)
                             if blob.encoding == "base64":
                                 file_content = base64.b64decode(blob.content)
-                                print(f"[INFO] Loaded {content.name} via git blob ({len(file_content)} bytes)")
+                                print(f"[INFO] ✓ Loaded {content.name} via git blob ({len(file_content)} bytes)")
                         except Exception as e:
                             print(f"[WARN] Failed to get blob for {content.name}: {e}")
                     
                     # 方法3: 通过 download_url 带认证头下载
                     if file_content is None and content.download_url:
                         try:
+                            print(f"[INFO] Trying download_url for {content.name}...")
                             headers = {
                                 "Authorization": f"token {token}",
                                 "Accept": "application/vnd.github.v3.raw"
                             }
-                            response = requests.get(content.download_url, headers=headers, timeout=60)
+                            response = requests.get(content.download_url, headers=headers, timeout=120)
                             if response.status_code == 200:
                                 file_content = response.content
-                                print(f"[INFO] Loaded {content.name} via download_url ({len(file_content)} bytes)")
+                                print(f"[INFO] ✓ Loaded {content.name} via download_url ({len(file_content)} bytes)")
                             else:
                                 print(f"[WARN] Failed to download {content.name}: HTTP {response.status_code}")
                         except Exception as e:
@@ -467,13 +479,14 @@ class GithubSync:
                     # 方法4: 使用 Raw URL 直接下载
                     if file_content is None:
                         try:
+                            print(f"[INFO] Trying raw URL for {content.name}...")
                             # 构造 raw URL
                             raw_url = f"https://raw.githubusercontent.com/{repo_name}/{branch}/{rag_folder}/{content.name}"
                             headers = {"Authorization": f"token {token}"}
-                            response = requests.get(raw_url, headers=headers, timeout=60)
+                            response = requests.get(raw_url, headers=headers, timeout=120)
                             if response.status_code == 200:
                                 file_content = response.content
-                                print(f"[INFO] Loaded {content.name} via raw URL ({len(file_content)} bytes)")
+                                print(f"[INFO] ✓ Loaded {content.name} via raw URL ({len(file_content)} bytes)")
                             else:
                                 print(f"[WARN] Failed to get raw {content.name}: HTTP {response.status_code}")
                         except Exception as e:
@@ -482,12 +495,13 @@ class GithubSync:
                     if file_content:
                         files.append((content.name, file_content))
                     else:
-                        print(f"[ERROR] Could not load {content.name} with any method")
+                        print(f"[ERROR] ✗ Could not load {content.name} with any method")
                             
             except GithubException as e:
                 if e.status == 404:
                     print(f"[INFO] RAG folder not found: {rag_folder}")
                     return []
+                print(f"[ERROR] GithubException: {e}")
                 raise e
             
             print(f"[INFO] Total loaded: {len(files)} files")
@@ -721,6 +735,60 @@ def bootstrap_seed_cases(embedder: AliyunEmbedder):
         st.session_state.cases = (case_idx, case_data)
         ResourceManager.save(case_idx, case_data, PATHS.case_index, PATHS.case_data, is_json=True)
 
+
+def load_rag_from_github(aliyun_key: str) -> Tuple[bool, str]:
+    """
+    从 GitHub 加载 RAG 文件
+    返回: (是否成功, 消息)
+    """
+    try:
+        rag_files = GithubSync.pull_rag_folder("tea_data/RAG")
+        
+        if not rag_files:
+            return False, "GitHub 上没有找到 RAG 文件"
+        
+        # 解析所有文件内容
+        all_text = ""
+        file_names = []
+        
+        for fname, fcontent in rag_files:
+            file_names.append(fname)
+            parsed_text = parse_file_bytes(fname, fcontent)
+            if parsed_text:
+                all_text += parsed_text + "\n"
+                print(f"[INFO] Parsed {fname}: {len(parsed_text)} chars")
+            else:
+                print(f"[WARN] No text extracted from {fname}")
+        
+        if not all_text.strip():
+            return False, "无法从 RAG 文件中提取文本"
+        
+        # 切片并构建索引
+        chunks = [all_text[i:i+600] for i in range(0, len(all_text), 500)]
+        
+        if not chunks:
+            return False, "切片失败"
+        
+        temp_embedder = AliyunEmbedder(aliyun_key)
+        kb_idx = faiss.IndexFlatL2(1024)
+        vecs = temp_embedder.encode(chunks)
+        kb_idx.add(vecs)
+        
+        st.session_state.kb = (kb_idx, chunks)
+        st.session_state.kb_files = file_names
+        
+        # 保存到本地缓存
+        ResourceManager.save(kb_idx, chunks, PATHS.kb_index, PATHS.kb_chunks)
+        ResourceManager.save_kb_files(file_names)
+        
+        return True, f"成功加载 {len(chunks)} 条知识片段，来自 {len(file_names)} 个文件"
+        
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return False, f"加载失败: {str(e)}"
+
+
 # ==========================================
 # [SECTION 3.5] 判例管理弹窗
 # ==========================================
@@ -878,70 +946,28 @@ def edit_case_dialog(case_idx: int, embedder: AliyunEmbedder):
 # ==========================================
 # A. 初始化 Session
 if 'loaded' not in st.session_state:
+    print("[INFO] ========== Initializing Session ==========")
     # 1. 加载RAG与判例数据
     kb_idx, kb_data = ResourceManager.load(PATHS.kb_index, PATHS.kb_chunks)
     case_idx, case_data = ResourceManager.load(PATHS.case_index, PATHS.case_data, is_json=True)
     st.session_state.kb = (kb_idx, kb_data)
     st.session_state.cases = (case_idx, case_data)
-    st.session_state.kb_files = ResourceManager.load_kb_files()  # 加载RAG文件列表
+    st.session_state.kb_files = ResourceManager.load_kb_files()
+    
+    print(f"[INFO] Local KB: {len(kb_data)} chunks, Cases: {len(case_data)} items")
     
     # 2. 如果本地RAG为空，尝试从GitHub拉取
     if len(kb_data) == 0:
         print("[INFO] Local KB is empty, trying to pull from GitHub...")
-        try:
-            # 先获取 API Key（需要用于向量化）
-            temp_aliyun_key = os.getenv("ALIYUN_API_KEY") or st.secrets.get("ALIYUN_API_KEY", "")
-            
-            if temp_aliyun_key:
-                rag_files = GithubSync.pull_rag_folder("tea_data/RAG")
-                
-                if rag_files:
-                    print(f"[INFO] Pulled {len(rag_files)} files from GitHub")
-                    # 解析所有文件内容
-                    all_text = ""
-                    file_names = []
-                    
-                    for fname, fcontent in rag_files:
-                        file_names.append(fname)
-                        print(f"[INFO] Parsing {fname} ({len(fcontent)} bytes)...")
-                        # 使用统一的解析函数
-                        parsed_text = parse_file_bytes(fname, fcontent)
-                        if parsed_text:
-                            all_text += parsed_text + "\n"
-                            print(f"[INFO] Parsed {fname}: {len(parsed_text)} chars")
-                        else:
-                            print(f"[WARN] No text extracted from {fname}")
-                    
-                    # 切片并构建索引
-                    if all_text.strip():
-                        print(f"[INFO] Total text: {len(all_text)} chars")
-                        chunks = [all_text[i:i+600] for i in range(0, len(all_text), 500)]
-                        print(f"[INFO] Created {len(chunks)} chunks")
-                        
-                        if chunks:
-                            temp_embedder = AliyunEmbedder(temp_aliyun_key)
-                            kb_idx = faiss.IndexFlatL2(1024)
-                            vecs = temp_embedder.encode(chunks)
-                            kb_idx.add(vecs)
-                            
-                            st.session_state.kb = (kb_idx, chunks)
-                            st.session_state.kb_files = file_names
-                            
-                            # 保存到本地缓存
-                            ResourceManager.save(kb_idx, chunks, PATHS.kb_index, PATHS.kb_chunks)
-                            ResourceManager.save_kb_files(file_names)
-                            
-                            print(f"[INFO] Successfully loaded {len(chunks)} chunks from {len(file_names)} RAG files")
-                    else:
-                        print("[WARN] No text extracted from any RAG files")
-                else:
-                    print("[INFO] No RAG files found on GitHub")
-            else:
-                print("[WARN] No ALIYUN_API_KEY found, skip RAG loading")
-        except Exception as e:
-            print(f"[ERROR] Auto-load RAG from GitHub failed: {e}")
-            import traceback
-            traceback.print_exc()
+        temp_aliyun_key = os.getenv("ALIYUN_API_KEY") or st.secrets.get("ALIYUN_API_KEY", "")
+        
+        if temp_aliyun_key:
+            success, msg = load_rag_from_github(temp_aliyun_key)
+            print(f"[INFO] Load RAG result: {success}, {msg}")
+        else:
+            print("[WARN] No ALIYUN_API_KEY found, skip RAG loading")
+    else:
+        print(f"[INFO] Using local KB cache: {len(kb_data)} chunks")
     
     # 3. 加载 Prompt 配置
     if PATHS.prompt_config_file.exists():
@@ -958,6 +984,7 @@ if 'loaded' not in st.session_state:
         }
     
     st.session_state.loaded = True
+    print("[INFO] ========== Session Initialized ==========")
 
 
 # B. 侧边栏
@@ -990,9 +1017,24 @@ with st.sidebar:
     
     st.markdown("---")
     kb_files = st.session_state.get('kb_files', [])
-    st.markdown(f"知识库: {len(st.session_state.kb[1])} 条 | 判例库: {len(st.session_state.cases[1])} 条")
+    kb_count = len(st.session_state.kb[1])
+    case_count = len(st.session_state.cases[1])
+    st.markdown(f"知识库: **{kb_count}** 条 | 判例库: **{case_count}** 条")
     if kb_files:
         st.caption(f"RAG文件: {', '.join(kb_files)}")
+    
+    # ===== 新增：手动刷新 RAG 按钮 =====
+    st.markdown("---")
+    if st.button("🔄 从GitHub刷新RAG", use_container_width=True):
+        with st.spinner("正在从 GitHub 拉取 RAG 文件..."):
+            success, msg = load_rag_from_github(aliyun_key)
+            if success:
+                st.success(f"✅ {msg}")
+                time.sleep(1)
+                st.rerun()
+            else:
+                st.error(f"❌ {msg}")
+    
     st.caption("快速上传仅支持.zip文件格式。")
     st.caption("少量文件上传请至\"模型调优\"板块。")
     
