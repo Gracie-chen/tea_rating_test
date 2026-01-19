@@ -1502,6 +1502,7 @@ with tab3:
         with column2:
             st.markdown("**🔧 知识库维护：**")
             local_kb_count = len(st.session_state.kb[1])
+            kb_files = st.session_state.get('kb_files', [])
             st.caption(f"网页端知识库：{local_kb_count} 个片段")
             st.markdown(f"网页端知识库文件: {'\n '.join(kb_files)}")
             st.sidebar()
