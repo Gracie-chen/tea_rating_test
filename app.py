@@ -1111,22 +1111,15 @@ if 'loaded' not in st.session_state:
     print(f"[INFO]   → 判例库: {len(case_data)} 条判例")
     print(f"[INFO]   → RAG 文件: {st.session_state.kb_files}")
     
-    # 2. 如果本地 RAG 为空，自动从 GitHub 拉取
-    print("[INFO] 步骤 2/3: 检查并加载 RAG 数据...")
+    # 2. 标记是否需要从 GitHub 加载 RAG（延迟加载）
+    print("[INFO] 步骤 2/3: 检查 RAG 状态...")
     if len(kb_data) == 0:
-        print("[INFO]   ⚠️  本地知识库为空，尝试从 GitHub 自动拉取...")
-        temp_aliyun_key = os.getenv("ALIYUN_API_KEY") or st.secrets.get("ALIYUN_API_KEY", "")
-        
-        if temp_aliyun_key:
-            success, msg = load_rag_from_github(temp_aliyun_key)
-            if success:
-                print(f"[INFO]   ✅ GitHub RAG 加载成功: {msg}")
-            else:
-                print(f"[ERROR]  ❌ GitHub RAG 加载失败: {msg}")
-                print("[INFO]   💡 提示: 请在 Tab3 手动上传 RAG 文件，或检查 GitHub 配置")
-        else:
-            print("[ERROR]  ❌ 未配置 ALIYUN_API_KEY，无法加载 RAG")
+        st.session_state.rag_loading_needed = True
+        st.session_state.rag_loading_status = "pending"
+        print("[INFO]   ⚠️  本地知识库为空，将在应用启动后从 GitHub 加载")
     else:
+        st.session_state.rag_loading_needed = False
+        st.session_state.rag_loading_status = "complete"
         print(f"[INFO]   ✅ 使用本地缓存: {len(kb_data)} 个片段")
     
     # 3. 加载 Prompt 配置
@@ -1149,7 +1142,7 @@ if 'loaded' not in st.session_state:
     
     st.session_state.loaded = True
     print("="*70)
-    print("[INFO] ========== 系统初始化完成 ==========")
+    print("[INFO] ========== 系统初始化完成（快速启动模式）==========")
     print("="*70 + "\n")
 
 
@@ -1183,12 +1176,69 @@ with st.sidebar:
     bootstrap_seed_cases(embedder)
     
     st.markdown("---")
+    
+    # ===== 延迟加载 RAG 逻辑 =====
     kb_files = st.session_state.get('kb_files', [])
     kb_count = len(st.session_state.kb[1])
     case_count = len(st.session_state.cases[1])
+    
+    # 检查是否需要从 GitHub 加载 RAG
+    if st.session_state.get('rag_loading_needed', False):
+        loading_status = st.session_state.get('rag_loading_status', 'pending')
+        
+        if loading_status == 'pending':
+            # 显示加载状态
+            with st.status("🔄 正在从 GitHub 加载知识库...", expanded=True) as status:
+                st.write("📥 下载 RAG 文件...")
+                st.session_state.rag_loading_status = 'loading'
+                
+                try:
+                    # 执行加载
+                    success, msg = load_rag_from_github(aliyun_key)
+                    
+                    if success:
+                        status.update(label="✅ 知识库加载完成", state="complete", expanded=False)
+                        st.session_state.rag_loading_status = 'complete'
+                        st.session_state.rag_loading_needed = False
+                        time.sleep(1)
+                        st.rerun()
+                    else:
+                        status.update(label="❌ 知识库加载失败", state="error", expanded=True)
+                        st.error(msg)
+                        st.info("💡 您可以在 Tab3 手动上传 RAG 文件")
+                        st.session_state.rag_loading_status = 'failed'
+                        
+                        # 添加重试按钮
+                        if st.button("🔄 重试加载", type="secondary"):
+                            st.session_state.rag_loading_status = 'pending'
+                            st.rerun()
+                except Exception as e:
+                    status.update(label="❌ 加载出错", state="error", expanded=True)
+                    st.error(f"加载失败: {str(e)}")
+                    st.session_state.rag_loading_status = 'failed'
+                    
+                    if st.button("🔄 重试加载", type="secondary"):
+                        st.session_state.rag_loading_status = 'pending'
+                        st.rerun()
+        
+        elif loading_status == 'loading':
+            st.info("🔄 正在加载知识库，请稍候...")
+        
+        elif loading_status == 'failed':
+            st.warning("⚠️ 知识库加载失败")
+            if st.button("🔄 重试从 GitHub 加载", type="secondary"):
+                st.session_state.rag_loading_status = 'pending'
+                st.rerun()
+    
+    # 更新显示的数据
+    kb_count = len(st.session_state.kb[1])
+    kb_files = st.session_state.get('kb_files', [])
+    
     st.markdown(f"知识库: **{kb_count}** 条 | 判例库: **{case_count}** 条")
     if kb_files:
         st.caption(f"RAG文件: {', '.join(kb_files)}")
+    elif kb_count == 0:
+        st.caption("⚠️ 知识库为空，请上传文件或从 GitHub 加载")
     
     st.caption("快速上传仅支持.zip文件格式。")
     st.caption("少量文件上传请至\"模型调优\"板块。")
