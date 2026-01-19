@@ -1502,9 +1502,9 @@ with tab3:
         with column2:
             st.markdown("**🔧 知识库维护：**")
             local_kb_count = len(st.session_state.kb[1])
-            kb_files = st.session_state.get('kb_files', [])
             st.caption(f"网页端知识库：{local_kb_count} 个片段")
-            st.markdown(f"网页端知识库文件: {'\n '.join(kb_files)}")
+            files_str = "\n ".join(kb_files)
+            st.markdown(f"网页端知识库文件:\n {files_str}") 
             st.sidebar()
             st.markdown("云端数据与网页数据不统一？")
             if st.button("🔄 从云端加载知识库", use_container_width=True, type="primary"):
