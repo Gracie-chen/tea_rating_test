@@ -6,7 +6,6 @@ import numpy as np
 import faiss
 import time
 import pickle
-import base64
 from github import Github, GithubException 
 from pathlib import Path
 from io import BytesIO
@@ -19,6 +18,7 @@ from openai import OpenAI
 from docx import Document
 import matplotlib.pyplot as plt
 from scipy.interpolate import make_interp_spline
+import base64
 
 # ==========================================
 # [SECTION 0] 基础配置与路径定义
@@ -41,6 +41,7 @@ st.markdown("""
     .advice-tag {font-size: 0.85em; padding: 2px 6px; border-radius: 4px; margin-top: 5px; background-color: #fff; border: 1px dashed #4CAF50; color: #388E3C; display: inline-block;}
     .master-comment {background-color: #FFFDE7; border: 1px solid #FFF9C4; padding: 15px; border-radius: 8px; font-family: "KaiTi", serif; font-size: 1.1em; color: #5D4037; margin-bottom: 20px; line-height: 1.6;}
     .ft-card {border: 1px solid #ddd; padding: 15px; border-radius: 8px; background-color: #f8f9fa; margin-top: 10px;}
+    .case-card {border: 1px solid #e0e0e0; padding: 12px; border-radius: 8px; margin-bottom: 10px; background-color: #fafafa;}
     </style>
 """, unsafe_allow_html=True)
 
@@ -48,19 +49,22 @@ class PathConfig:
     """路径管理类"""
     # 外部资源文件（位于同级目录）
     SRC_SYS_PROMPT = Path("sys_p.txt")
-    SRC_SEED_CASES = Path("seed_case.json")
+    # 修改：将 seed_case.json 改为 tea_data/case.json
+    SRC_CASES = Path("tea_data/case.json")  # GitHub上的路径
 
     # 运行时数据目录
     DATA_DIR = Path("./tea_data")
+    RAG_DIR = Path("./tea_data/RAG")  # 新增：RAG文件存储目录
     
     def __init__(self):
         self.DATA_DIR.mkdir(exist_ok=True)
+        self.RAG_DIR.mkdir(exist_ok=True)  # 确保RAG目录存在
         # 向量库与持久化数据
         self.kb_index = self.DATA_DIR / "kb.index"
         self.kb_chunks = self.DATA_DIR / "kb_chunks.pkl"
         self.kb_files = self.DATA_DIR / "kb_files.json"  # 新增：记录RAG文件列表
         self.case_index = self.DATA_DIR / "cases.index"
-        self.case_data = self.DATA_DIR / "cases.json"
+        self.case_data = self.DATA_DIR / "case.json"  # 修改：与GitHub保持一致
         
         # 微调与Prompt配置
         self.training_file = self.DATA_DIR / "deepseek_finetune.jsonl"
@@ -112,7 +116,7 @@ class ResourceManager:
 
     @staticmethod
     def load_external_json(path: Path, fallback: Any = None) -> Any:
-        """读取外部JSON文件 (如 seed_case.json)"""
+        """读取外部JSON文件"""
         if path.exists():
             try:
                 with open(path, "r", encoding="utf-8") as f:
@@ -141,27 +145,37 @@ class ResourceManager:
             except: pass
         return faiss.IndexFlatL2(1024), []
 
-    # ===== RAG文件管理 (新增) =====
+    # ===== 微调相关方法 =====
     @staticmethod
-    def save_kb_files(file_list: List[str]):
-        """保存知识库文件列表"""
-        with open(PATHS.kb_files, "w", encoding="utf-8") as f:
-            json.dump(file_list, f, ensure_ascii=False, indent=2)
-    
-    @staticmethod
-    def load_kb_files() -> List[str]:
-        """加载知识库文件列表"""
-        if PATHS.kb_files.exists():
-            try:
-                with open(PATHS.kb_files, "r", encoding="utf-8") as f:
-                    return json.load(f)
-            except: pass
-        return []
+    def overwrite_finetune(cases: List[Dict], sys_prompt: str, user_tpl: str) -> int:
+        """覆盖写入微调数据集 (.jsonl) - 修改为覆盖逻辑"""
+        try:
+            count = 0
+            with open(PATHS.training_file, "w", encoding="utf-8") as f:
+                for c in cases:
+                    case_text = c.get("text", "")
+                    scores = c.get("scores", {})
+                    master_comment = c.get("master_comment", "（人工校准）")
+                    
+                    user_content = user_tpl.format(product_desc=case_text, context_text="", case_text="")
+                    assistant_content = json.dumps({"master_comment": master_comment, "scores": scores}, ensure_ascii=False)
+                    entry = {
+                        "messages": [
+                            {"role": "system", "content": sys_prompt},
+                            {"role": "user", "content": user_content},
+                            {"role": "assistant", "content": assistant_content}
+                        ]
+                    }
+                    f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+                    count += 1
+            return count
+        except Exception as e:
+            print(f"[ERROR] Finetune overwrite failed: {e}")
+            return 0
 
-# 以下三个方法用于微调
     @staticmethod
     def append_to_finetune(case_text: str, scores: Dict, sys_prompt: str, user_tpl: str, master_comment: str = "（人工校准）") -> bool:
-        """将判例写入微调数据集 (.jsonl)"""
+        """将单个判例追加到微调数据集"""
         try:
             user_content = user_tpl.format(product_desc=case_text, context_text="", case_text="")
             assistant_content = json.dumps({"master_comment": master_comment, "scores": scores}, ensure_ascii=False)
@@ -192,6 +206,23 @@ class ResourceManager:
             except: pass
         return None
 
+    # ===== RAG文件管理 =====
+    @staticmethod
+    def save_kb_files(file_list: List[str]):
+        """保存知识库文件列表"""
+        with open(PATHS.kb_files, "w", encoding="utf-8") as f:
+            json.dump(file_list, f, ensure_ascii=False, indent=2)
+    
+    @staticmethod
+    def load_kb_files() -> List[str]:
+        """加载知识库文件列表"""
+        if PATHS.kb_files.exists():
+            try:
+                with open(PATHS.kb_files, "r", encoding="utf-8") as f:
+                    return json.load(f)
+            except: pass
+        return []
+
 # ==========================================
 # [SECTION 1.5] Github 同步工具 (增强版)
 # ==========================================
@@ -209,12 +240,7 @@ class GithubSync:
     
     @staticmethod
     def push_json(file_path_in_repo: str, data_dict: Dict, commit_msg: str = "Update via Streamlit") -> bool:
-        """
-        推送 JSON 数据到 Github
-        :param file_path_in_repo: 仓库内的文件路径，例如 "tea_data/prompts.json"
-        :param data_dict: 要保存的字典数据
-        :param commit_msg: 提交信息
-        """
+        """推送 JSON 数据到 Github"""
         token, repo_name, branch = GithubSync._get_github_config()
         
         if not token or not repo_name:
@@ -252,10 +278,135 @@ class GithubSync:
             return False
 
     @staticmethod
+    def push_binary_file(file_path_in_repo: str, file_content: bytes, commit_msg: str = "Upload file") -> bool:
+        """推送二进制文件到 Github (如PDF, DOCX等)"""
+        token, repo_name, branch = GithubSync._get_github_config()
+        
+        if not token or not repo_name:
+            st.error("❌ 未配置 Github Token 或 仓库名")
+            return False
+
+        try:
+            g = Github(token)
+            repo = g.get_repo(repo_name)
+            content_b64 = base64.b64encode(file_content).decode('utf-8')
+            
+            try:
+                contents = repo.get_contents(file_path_in_repo, ref=branch)
+                repo.update_file(
+                    path=contents.path,
+                    message=commit_msg,
+                    content=content_b64,
+                    sha=contents.sha,
+                    branch=branch
+                )
+            except GithubException as e:
+                if e.status == 404:
+                    repo.create_file(
+                        path=file_path_in_repo,
+                        message=f"Create {file_path_in_repo}",
+                        content=content_b64,
+                        branch=branch
+                    )
+                else:
+                    raise e
+            return True
+
+        except Exception as e:
+            st.error(f"Github 文件上传失败: {str(e)}")
+            return False
+
+    @staticmethod
+    def delete_file(file_path_in_repo: str, commit_msg: str = "Delete file") -> bool:
+        """从 Github 删除文件"""
+        token, repo_name, branch = GithubSync._get_github_config()
+        
+        if not token or not repo_name:
+            return False
+
+        try:
+            g = Github(token)
+            repo = g.get_repo(repo_name)
+            
+            try:
+                contents = repo.get_contents(file_path_in_repo, ref=branch)
+                repo.delete_file(
+                    path=contents.path,
+                    message=commit_msg,
+                    sha=contents.sha,
+                    branch=branch
+                )
+                return True
+            except GithubException as e:
+                if e.status == 404:
+                    return True  # 文件本来就不存在
+                raise e
+
+        except Exception as e:
+            st.error(f"Github 删除文件失败: {str(e)}")
+            return False
+
+    @staticmethod
+    def sync_rag_folder(current_files: List[str], uploaded_files: List, rag_folder: str = "tea_data/RAG") -> bool:
+        """
+        同步RAG文件夹到GitHub
+        - current_files: 当前应该存在的文件名列表
+        - uploaded_files: Streamlit上传的文件对象列表
+        - rag_folder: GitHub上的RAG文件夹路径
+        """
+        token, repo_name, branch = GithubSync._get_github_config()
+        
+        if not token or not repo_name:
+            st.error("❌ 未配置 Github Token 或 仓库名")
+            return False
+
+        try:
+            g = Github(token)
+            repo = g.get_repo(repo_name)
+            
+            # 1. 获取GitHub上RAG文件夹中现有的文件
+            existing_files = []
+            try:
+                contents = repo.get_contents(rag_folder, ref=branch)
+                existing_files = [c.name for c in contents if c.type == "file"]
+            except GithubException as e:
+                if e.status != 404:
+                    raise e
+                # 404表示文件夹不存在，这是OK的
+            
+            # 2. 计算需要删除的文件（在GitHub上有但不在当前列表中）
+            files_to_delete = set(existing_files) - set(current_files)
+            
+            # 3. 删除多余的文件
+            for fname in files_to_delete:
+                file_path = f"{rag_folder}/{fname}"
+                GithubSync.delete_file(file_path, f"Delete RAG file: {fname}")
+            
+            # 4. 上传/更新当前的文件
+            for uf in uploaded_files:
+                file_path = f"{rag_folder}/{uf.name}"
+                uf.seek(0)
+                file_content = uf.read()
+                GithubSync.push_binary_file(file_path, file_content, f"Update RAG file: {uf.name}")
+            
+            return True
+
+        except Exception as e:
+            st.error(f"RAG同步失败: {str(e)}")
+            return False
+
+    @staticmethod
+    def sync_cases(cases: List[Dict], file_path: str = "tea_data/case.json") -> bool:
+        """同步判例库到GitHub"""
+        return GithubSync.push_json(file_path, cases, "Update case.json from App")
+
+    @staticmethod
     def pull_rag_folder(rag_folder: str = "tea_data/RAG") -> List[Tuple[str, bytes]]:
         """
         从 GitHub 拉取 RAG 文件夹中的所有文件
         返回: [(文件名, 文件内容bytes), ...]
+        
+        修复：对于大文件，GitHub API 不会直接返回 content，需要通过 download_url 下载
         """
         token, repo_name, branch = GithubSync._get_github_config()
         
@@ -272,10 +423,28 @@ class GithubSync:
                 contents = repo.get_contents(rag_folder, ref=branch)
                 for content in contents:
                     if content.type == "file":
-                        # 下载文件内容
-                        file_content = base64.b64decode(content.content)
-                        files.append((content.name, file_content))
-                        print(f"[INFO] Pulled RAG file: {content.name}")
+                        try:
+                            # 方法1：尝试直接从 content.content 获取（小文件）
+                            if content.content is not None:
+                                file_content = base64.b64decode(content.content)
+                            # 方法2：通过 download_url 下载（大文件或 content 为空）
+                            elif content.download_url:
+                                response = requests.get(content.download_url, timeout=30)
+                                if response.status_code == 200:
+                                    file_content = response.content
+                                else:
+                                    print(f"[WARN] Failed to download {content.name}: HTTP {response.status_code}")
+                                    continue
+                            else:
+                                print(f"[WARN] Cannot get content for {content.name}")
+                                continue
+                            
+                            files.append((content.name, file_content))
+                            print(f"[INFO] Pulled RAG file: {content.name} ({len(file_content)} bytes)")
+                        except Exception as e:
+                            print(f"[WARN] Failed to pull {content.name}: {e}")
+                            continue
+                            
             except GithubException as e:
                 if e.status == 404:
                     print(f"[INFO] RAG folder not found: {rag_folder}")
@@ -287,6 +456,7 @@ class GithubSync:
         except Exception as e:
             print(f"[ERROR] Pull RAG folder failed: {e}")
             return []
+
 
 # ==========================================
 # [SECTION 2] AI 服务 (Embedding & LLM)
@@ -308,10 +478,7 @@ class AliyunEmbedder:
         return np.zeros((len(texts), 1024), dtype="float32")
 
 def llm_normalize_user_input(raw_query: str, client: OpenAI) -> str:
-    """
-    使用 LLM 对用户输入做语义规范化 / 去噪
-    不涉及总体prompt 修改
-    """
+    """使用 LLM 对用户输入做语义规范化 / 去噪"""
     system_prompt = (
         """
           A. 角色与目标
@@ -351,7 +518,6 @@ def llm_normalize_user_input(raw_query: str, client: OpenAI) -> str:
 
 def run_scoring(text: str, kb_res: Tuple, case_res: Tuple, prompt_cfg: Dict, embedder: AliyunEmbedder, client: OpenAI, model_id: str, k_num: int, c_num: int):
     """执行 RAG 检索与 LLM 评分"""
-    # 1. 向量化与 RAG 检索
     vec = embedder.encode([text]) 
     
     ctx_txt, hits = "（无手册资料）", []
@@ -360,7 +526,6 @@ def run_scoring(text: str, kb_res: Tuple, case_res: Tuple, prompt_cfg: Dict, emb
         hits = [kb_res[1][i] for i in idx[0] if i < len(kb_res[1])]
         ctx_txt = "\n".join([f"- {h[:200]}..." for h in hits])
 
-    # 如果后续用Lora微调方法的话是否是考虑删除这一段few-shot    
     case_txt, found_cases = "（无相似判例）", []
     if case_res[0].ntotal > 0:
         _, idx = case_res[0].search(vec, c_num)
@@ -373,11 +538,9 @@ def run_scoring(text: str, kb_res: Tuple, case_res: Tuple, prompt_cfg: Dict, emb
                 k_sc = sc.get('苦涩度',{}).get('score', 0) if isinstance(sc,dict) and '苦涩度' in sc else 0
                 case_txt += f"\n参考案例: {c['text'][:30]}... -> 优雅性:{u_sc} 苦涩度:{k_sc}"
 
-    # 2. 组装 Prompt
     sys_p = prompt_cfg.get('system_template', "")
     user_p = prompt_cfg.get('user_template', "").format(product_desc=text, context_text=ctx_txt, case_text=case_txt)
 
-    # 3. 调用 LLM
     try:
         resp = client.chat.completions.create(
             model=model_id,
@@ -404,7 +567,7 @@ def parse_file(uploaded_file) -> str:
     return ""
 
 def parse_file_bytes(filename: str, content: bytes) -> str:
-    """解析文件内容 (从bytes)"""
+    """解析文件内容 (从bytes) - 用于从GitHub拉取的文件"""
     try:
         if filename.endswith('.txt'):
             return content.decode('utf-8')
@@ -484,16 +647,19 @@ def plot_flavor_shape(scores_data: Dict):
     return fig
 
 def bootstrap_seed_cases(embedder: AliyunEmbedder):
-    """
-    初始化判例库：如果内存/磁盘中为空，则从 seed_case.json 文件读取。
-    """
+    """初始化判例库：如果内存/磁盘中为空，则从 case.json 文件读取"""
     case_idx, case_data = st.session_state.cases
     if len(case_data) > 0: return
 
-    # 从外部 JSON 加载
-    seed_cases = ResourceManager.load_external_json(PATHS.SRC_SEED_CASES)
+    # 从外部 JSON 加载 (修改路径)
+    seed_cases = ResourceManager.load_external_json(PATHS.SRC_CASES)
     if not seed_cases:
-        st.warning("seed_case.json 未找到或为空，判例库初始化跳过。")
+        # 兼容旧路径
+        old_path = Path("seed_case.json")
+        seed_cases = ResourceManager.load_external_json(old_path)
+    
+    if not seed_cases:
+        st.warning("case.json 未找到或为空，判例库初始化跳过。")
         return
 
     texts = [c["text"] for c in seed_cases]
@@ -506,62 +672,161 @@ def bootstrap_seed_cases(embedder: AliyunEmbedder):
         st.session_state.cases = (case_idx, case_data)
         ResourceManager.save(case_idx, case_data, PATHS.case_index, PATHS.case_data, is_json=True)
 
-def bootstrap_rag_from_github(aliyun_key: str):
-    """
-    从 GitHub 拉取 RAG 文件并初始化知识库
-    """
-    kb_idx, kb_data = st.session_state.kb
+# ==========================================
+# [SECTION 3.5] 判例管理弹窗
+# ==========================================
+
+@st.dialog("📋 判例库管理", width="large")
+def show_cases_dialog(embedder: AliyunEmbedder):
+    """展示并管理所有判例的弹窗"""
+    cases = st.session_state.cases[1]
     
-    # 如果本地已有数据，跳过
-    if len(kb_data) > 0:
+    if not cases:
+        st.info("当前判例库为空")
         return
     
-    # 尝试从 GitHub 拉取
-    rag_files = GithubSync.pull_rag_folder("tea_data/RAG")
+    st.write(f"共 **{len(cases)}** 条判例")
     
-    if not rag_files:
-        print("[INFO] No RAG files found on GitHub")
+    # 用于追踪需要删除的判例索引
+    if 'cases_to_delete' not in st.session_state:
+        st.session_state.cases_to_delete = set()
+    
+    # 用于追踪编辑状态
+    if 'editing_case_idx' not in st.session_state:
+        st.session_state.editing_case_idx = None
+    
+    for idx, case in enumerate(cases):
+        with st.container(border=True):
+            col1, col2, col3 = st.columns([6, 1, 1])
+            
+            with col1:
+                # 显示判例摘要
+                text_preview = case.get('text', '')[:100] + ('...' if len(case.get('text', '')) > 100 else '')
+                st.markdown(f"**#{idx+1}** {text_preview}")
+                
+                # 显示分数摘要
+                scores = case.get('scores', {})
+                if scores:
+                    score_str = " | ".join([f"{k}:{v.get('score', '?')}" for k, v in scores.items()])
+                    st.caption(score_str)
+            
+            with col2:
+                if st.button("✏️", key=f"edit_{idx}", help="编辑此判例"):
+                    st.session_state.editing_case_idx = idx
+                    st.rerun()
+            
+            with col3:
+                if st.button("🗑️", key=f"del_{idx}", help="删除此判例"):
+                    st.session_state.cases_to_delete.add(idx)
+                    st.rerun()
+    
+    # 如果有待删除的判例
+    if st.session_state.cases_to_delete:
+        st.warning(f"将删除 {len(st.session_state.cases_to_delete)} 条判例")
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("✅ 确认删除并同步", type="primary"):
+                # 执行删除
+                new_cases = [c for i, c in enumerate(cases) if i not in st.session_state.cases_to_delete]
+                
+                # 重建FAISS索引
+                new_idx = faiss.IndexFlatL2(1024)
+                if new_cases:
+                    texts = [c["text"] for c in new_cases]
+                    vecs = embedder.encode(texts)
+                    new_idx.add(vecs)
+                
+                st.session_state.cases = (new_idx, new_cases)
+                ResourceManager.save(new_idx, new_cases, PATHS.case_index, PATHS.case_data, is_json=True)
+                
+                # 同步到GitHub
+                with st.spinner("同步到GitHub..."):
+                    GithubSync.sync_cases(new_cases)
+                
+                st.session_state.cases_to_delete = set()
+                st.success("删除完成！")
+                time.sleep(1)
+                st.rerun()
+        with col2:
+            if st.button("❌ 取消"):
+                st.session_state.cases_to_delete = set()
+                st.rerun()
+
+
+@st.dialog("✏️ 编辑判例", width="large")
+def edit_case_dialog(case_idx: int, embedder: AliyunEmbedder):
+    """编辑单个判例的弹窗"""
+    cases = st.session_state.cases[1]
+    if case_idx >= len(cases):
+        st.error("判例不存在")
         return
     
-    # 解析所有文件内容
-    all_text = ""
-    file_names = []
-    for fname, fcontent in rag_files:
-        file_names.append(fname)
-        parsed = parse_file_bytes(fname, fcontent)
-        if parsed:
-            all_text += parsed + "\n"
+    case = cases[case_idx]
+    factors = ["优雅性", "辨识度", "协调性", "饱和度", "持久性", "苦涩度"]
     
-    if not all_text.strip():
-        print("[WARN] No valid text extracted from RAG files")
-        return
+    st.subheader(f"编辑判例 #{case_idx + 1}")
     
-    # 切片
-    chunks = [all_text[i:i+600] for i in range(0, len(all_text), 500)]
+    # 编辑文本
+    new_text = st.text_area("判例描述", case.get("text", ""), height=100)
+    new_master = st.text_area("总评", case.get("master_comment", ""), height=60)
+    new_tags = st.text_input("标签", case.get("tags", ""))
     
-    if not chunks:
-        return
+    # 编辑各因子分数
+    st.markdown("**因子评分**")
+    new_scores = {}
+    cols = st.columns(3)
     
-    # 向量化
-    temp_embedder = AliyunEmbedder(aliyun_key)
-    kb_idx = faiss.IndexFlatL2(1024)
-    vecs = temp_embedder.encode(chunks)
-    kb_idx.add(vecs)
+    old_scores = case.get("scores", {})
+    for i, f in enumerate(factors):
+        with cols[i % 3]:
+            with st.container(border=True):
+                st.markdown(f"**{f}**")
+                old_f = old_scores.get(f, {})
+                new_scores[f] = {
+                    "score": st.number_input(f"分数", 0, 9, int(old_f.get("score", 5)), key=f"edit_s_{f}"),
+                    "comment": st.text_input(f"评语", old_f.get("comment", ""), key=f"edit_c_{f}"),
+                    "suggestion": st.text_input(f"建议", old_f.get("suggestion", ""), key=f"edit_sg_{f}")
+                }
     
-    # 更新 session_state
-    st.session_state.kb = (kb_idx, chunks)
-    st.session_state.kb_files = file_names
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("💾 保存修改并同步", type="primary"):
+            # 更新判例
+            cases[case_idx] = {
+                "text": new_text,
+                "scores": new_scores,
+                "tags": new_tags,
+                "master_comment": new_master,
+                "created_at": case.get("created_at", time.strftime("%Y-%m-%d"))
+            }
+            
+            # 重建FAISS索引（因为文本可能变了）
+            new_idx = faiss.IndexFlatL2(1024)
+            texts = [c["text"] for c in cases]
+            vecs = embedder.encode(texts)
+            new_idx.add(vecs)
+            
+            st.session_state.cases = (new_idx, cases)
+            ResourceManager.save(new_idx, cases, PATHS.case_index, PATHS.case_data, is_json=True)
+            
+            # 同步到GitHub
+            with st.spinner("同步到GitHub..."):
+                GithubSync.sync_cases(cases)
+            
+            st.session_state.editing_case_idx = None
+            st.success("保存成功！")
+            time.sleep(1)
+            st.rerun()
     
-    # 保存到本地缓存
-    ResourceManager.save(kb_idx, chunks, PATHS.kb_index, PATHS.kb_chunks)
-    ResourceManager.save_kb_files(file_names)
-    
-    print(f"[INFO] Loaded {len(chunks)} chunks from {len(file_names)} RAG files")
+    with col2:
+        if st.button("❌ 取消"):
+            st.session_state.editing_case_idx = None
+            st.rerun()
+
 
 # ==========================================
 # [SECTION 4] 主程序逻辑
 # ==========================================
-
 # A. 初始化 Session
 if 'loaded' not in st.session_state:
     # 1. 加载RAG与判例数据
@@ -569,19 +834,58 @@ if 'loaded' not in st.session_state:
     case_idx, case_data = ResourceManager.load(PATHS.case_index, PATHS.case_data, is_json=True)
     st.session_state.kb = (kb_idx, kb_data)
     st.session_state.cases = (case_idx, case_data)
-    st.session_state.kb_files = ResourceManager.load_kb_files()
+    st.session_state.kb_files = ResourceManager.load_kb_files()  # 加载RAG文件列表
     
-    # 2. 加载 Prompt 配置
-    # 优先读取持久化的 prompts.json，如果没有，则从 sys_p.txt 构建默认配置 - 实现prompts修改永久化
+    # 2. 如果本地RAG为空，尝试从GitHub拉取
+    if len(kb_data) == 0:
+        try:
+            # 先获取 API Key（需要用于向量化）
+            temp_aliyun_key = os.getenv("ALIYUN_API_KEY") or st.secrets.get("ALIYUN_API_KEY", "")
+            
+            if temp_aliyun_key:
+                rag_files = GithubSync.pull_rag_folder("tea_data/RAG")
+                
+                if rag_files:
+                    # 解析所有文件内容
+                    all_text = ""
+                    file_names = []
+                    
+                    for fname, fcontent in rag_files:
+                        file_names.append(fname)
+                        # 使用统一的解析函数
+                        parsed_text = parse_file_bytes(fname, fcontent)
+                        if parsed_text:
+                            all_text += parsed_text + "\n"
+                    
+                    # 切片并构建索引
+                    if all_text.strip():
+                        chunks = [all_text[i:i+600] for i in range(0, len(all_text), 500)]
+                        
+                        if chunks:
+                            temp_embedder = AliyunEmbedder(temp_aliyun_key)
+                            kb_idx = faiss.IndexFlatL2(1024)
+                            vecs = temp_embedder.encode(chunks)
+                            kb_idx.add(vecs)
+                            
+                            st.session_state.kb = (kb_idx, chunks)
+                            st.session_state.kb_files = file_names
+                            
+                            # 保存到本地缓存
+                            ResourceManager.save(kb_idx, chunks, PATHS.kb_index, PATHS.kb_chunks)
+                            ResourceManager.save_kb_files(file_names)
+                            
+                            print(f"[INFO] Auto-loaded {len(chunks)} chunks from {len(file_names)} RAG files")
+        except Exception as e:
+            print(f"[WARN] Auto-load RAG from GitHub failed: {e}")
+    
+    # 3. 加载 Prompt 配置
     if PATHS.prompt_config_file.exists():
         try:
-            with open(PATHS.prompt_config_file, 'r') as f:
+            with open(PATHS.prompt_config_file, 'r', encoding='utf-8') as f:
                 st.session_state.prompt_config = json.load(f)
         except: pass
         
-    # 备用方法，后续可以删除
     if 'prompt_config' not in st.session_state:
-        # 从 sys_p.txt 读取 System Prompt，使用硬编码的 User Prompt
         sys_prompt_content = ResourceManager.load_external_text(PATHS.SRC_SYS_PROMPT, fallback="你是一名茶评专家...")
         st.session_state.prompt_config = {
             "system_template": sys_prompt_content,
@@ -589,6 +893,7 @@ if 'loaded' not in st.session_state:
         }
     
     st.session_state.loaded = True
+
 
 # B. 侧边栏
 with st.sidebar:
@@ -607,7 +912,7 @@ with st.sidebar:
     st.markdown(f"**预处理模型：** `Deepseek-chat`")
     st.markdown(f"**评分模型：** `Qwen2.5-7B-Instruct`")
     model_id = "Qwen2.5-7B-Instruct"
-    # 加载微调模型（如有）
+    
     ft_status = ResourceManager.load_ft_status()
     if ft_status and ft_status.get("status") == "succeeded":
         st.info(f"🎉 发现微调模型：`{ft_status.get('fine_tuned_model')}`")
@@ -616,24 +921,16 @@ with st.sidebar:
     client = OpenAI(api_key="dummy", base_url="http://117.50.89.74:8000/v1")
     client_d = OpenAI(api_key=deepseek_key, base_url="https://api.deepseek.com")
     
-    # 确保初始化判例
     bootstrap_seed_cases(embedder)
     
-    # ===== 新增：自动从 GitHub 拉取 RAG =====
-    bootstrap_rag_from_github(aliyun_key)
-    
-    # 展示当前RAG与判例容量
     st.markdown("---")
-    kb_count = len(st.session_state.kb[1])
-    case_count = len(st.session_state.cases[1])
     kb_files = st.session_state.get('kb_files', [])
-    
-    st.markdown(f"知识库: {kb_count} 条 | 判例库: {case_count} 条")
+    st.markdown(f"知识库: {len(st.session_state.kb[1])} 条 | 判例库: {len(st.session_state.cases[1])} 条")
     if kb_files:
         st.caption(f"RAG文件: {', '.join(kb_files)}")
     st.caption("快速上传仅支持.zip文件格式。")
     st.caption("少量文件上传请至\"模型调优\"板块。")
-    # 
+    
     if st.button("📤 导出数据"):
         import zipfile, shutil
         temp_dir = Path("./temp_export"); temp_dir.mkdir(exist_ok=True)
@@ -668,11 +965,11 @@ with tab1:
     c1, c2, c3, c4, c5 = st.columns([1, 3, 1, 3, 1])
     r_num = c2.number_input("参考知识库条目数量", 1, 20, 3, key="r1")
     c_num = c4.number_input("参考判例库条目数量", 1, 20, 2, key="c1")
-    # 使用会话状态存储用户输入，避免刷新后丢失
+    
     if 'current_user_input' not in st.session_state: st.session_state.current_user_input = ""
     user_input = st.text_area("请输入茶评描述:", value=st.session_state.current_user_input, height=150, key="ui")
     st.session_state.current_user_input = user_input
-    # 使用会话状态存储评分结果
+    
     if 'last_scores' not in st.session_state: 
         st.session_state.last_scores = None
         st.session_state.last_master_comment = ""
@@ -693,14 +990,13 @@ with tab1:
                         for key in [f"s_{f}", f"c_{f}", f"sg_{f}"]:
                             if key in st.session_state:
                                 del st.session_state[key]
-                    
                     st.rerun()
     
     if st.session_state.last_scores:
         s = st.session_state.last_scores["scores"]
         mc = st.session_state.last_master_comment
         st.markdown(f'<div class="master-comment"><b>👵 宗师总评：</b><br>{mc}</div>', unsafe_allow_html=True)
-        # 展示评分结果（包含可视化）
+        
         left_col, right_col = st.columns([35, 65]) 
         with left_col:
             st.subheader("📊 风味形态")
@@ -717,7 +1013,7 @@ with tab1:
         st.subheader("🛠️ 评分校准与修正")
         cal_master = st.text_area("校准总评", mc)
         cal_scores = {}
-        st.write("分项调整") # 加个小标题提示
+        st.write("分项调整")
         active_factors = [f for f in factors if f in s]
         grid_cols = st.columns(3) 
         for i, f in enumerate(active_factors):
@@ -740,7 +1036,12 @@ with tab1:
             st.session_state.cases[0].add(embedder.encode([user_input]))
             ResourceManager.save(st.session_state.cases[0], st.session_state.cases[1], PATHS.case_index, PATHS.case_data, is_json=True)
             ResourceManager.append_to_finetune(user_input, cal_scores, st.session_state.prompt_config['system_template'], st.session_state.prompt_config['user_template'], cal_master)
-            st.success("校准已保存"); st.rerun()
+            
+            # 同步到GitHub
+            with st.spinner("同步判例到GitHub..."):
+                GithubSync.sync_cases(st.session_state.cases[1])
+            
+            st.success("校准已保存并同步"); st.rerun()
 
 # --- Tab 2: 批量评分 ---
 with tab2:
@@ -763,22 +1064,25 @@ with tab2:
 with tab3:
     MANAGER_URL = "http://117.50.89.74:8001"
     c1, c2 = st.columns([6, 4])
+    
     with c1:
         st.subheader("📚 知识库 (RAG)")
-        st.caption("上传PDF/文档以增强模型回答的准确性")
+        st.caption("上传PDF/文档以增强模型回答的准确性。文件将同步到GitHub。")
         
         # 显示当前知识库文件
         current_kb_files = st.session_state.get('kb_files', [])
         if current_kb_files:
             st.info(f"当前知识库文件：{', '.join(current_kb_files)}")
         
-        up = st.file_uploader("上传资料", accept_multiple_files=True, key="kb_uploader")
-        if up and st.button("更新知识库"):
+        up = st.file_uploader("上传资料", accept_multiple_files=True, key="kb_uploader", 
+                              type=['pdf', 'txt', 'docx'])
+        
+        if up and st.button("更新知识库并同步到GitHub"):
             with st.spinner("正在切片与向量化..."):
                 raw = "".join([parse_file(u) for u in up])
-                # 简单的切片逻辑
                 cks = [raw[i:i+600] for i in range(0, len(raw), 500)]
                 idx = faiss.IndexFlatL2(1024)
+                
                 if len(cks) > 0:
                     idx.add(embedder.encode(cks))
                     st.session_state.kb = (idx, cks)
@@ -789,13 +1093,30 @@ with tab3:
                     st.session_state.kb_files = file_names
                     ResourceManager.save_kb_files(file_names)
                     
-                    st.success(f"已更新 {len(cks)} 个知识片段")
+                    # 同步到GitHub
+                    with st.spinner("同步到GitHub..."):
+                        success = GithubSync.sync_rag_folder(file_names, up, "tea_data/RAG")
+                        if success:
+                            st.success(f"✅ 已更新 {len(cks)} 个知识片段，并同步到GitHub")
+                        else:
+                            st.warning(f"⚠️ 本地更新成功，但GitHub同步失败")
+                    
                     time.sleep(1)
                     st.rerun()
                 else:
                     st.warning("未提取到有效文本")
+        
         st.divider()
         st.subheader("📕 判例库 (CASE)")
+        
+        # ===== 新增：展示当前判例按钮 =====
+        if st.button("📋 展示当前判例", use_container_width=True):
+            show_cases_dialog(embedder)
+        
+        # 检查是否需要打开编辑弹窗
+        if st.session_state.get('editing_case_idx') is not None:
+            edit_case_dialog(st.session_state.editing_case_idx, embedder)
+        
         with st.expander("➕ 手动添加精细判例"):
             with st.form("case_form"):
                 f_txt = st.text_area("判例描述", height=80)
@@ -811,28 +1132,29 @@ with tab3:
                         sug = st.text_input(f"{f}建议", key=f"a_{i}")
                         input_scores[f] = {"score": val, "comment": cmt, "suggestion": sug}
                 
-                if st.form_submit_button("保存判例"):
-                    new_c = {"text": f_txt, "tags": f_tag, "scores": input_scores}
+                if st.form_submit_button("保存判例并同步"):
+                    new_c = {"text": f_txt, "tags": f_tag, "scores": input_scores, "created_at": time.strftime("%Y-%m-%d")}
                     st.session_state.cases[1].append(new_c)
                     vec = embedder.encode([f_txt])
                     st.session_state.cases[0].add(vec)
                     ResourceManager.save(st.session_state.cases[0], st.session_state.cases[1], PATHS.case_index, PATHS.case_data, is_json=True)
-                    st.success("已保存！")
+                    
+                    # 同步到GitHub
+                    with st.spinner("同步到GitHub..."):
+                        GithubSync.sync_cases(st.session_state.cases[1])
+                    
+                    st.success("已保存并同步！")
                     time.sleep(1); st.rerun()
 
-    # --- 右侧：微调控制 (核心修改部分) ---
+    # --- 右侧：微调控制 ---
     with c2:
         st.subheader("🚀 模型微调 (LoRA)")
-        # 1. 获取服务器状态
+        
         server_status = "unknown"
         try:
-            # 设置短超时，防止界面卡死
             resp = requests.get(f"{MANAGER_URL}/status", timeout=2)
             if resp.status_code == 200:
                 status_data = resp.json()
-                # 根据返回的 vllm_status 判断
-                # 假如服务器返回 {"vllm_status": "running"} -> 空闲/推理中
-                # 假如服务器返回 {"vllm_status": "stopped"} -> 训练中
                 if status_data.get("vllm_status") == "running":
                     server_status = "idle"
                 else:
@@ -841,7 +1163,7 @@ with tab3:
                 server_status = "error"
         except:
             server_status = "offline"
-        # 2. 服务器状态可视化
+        
         if server_status == "idle":
             st.success("🟢 服务器就绪 (正在进行推理服务)")
         elif server_status == "training":
@@ -850,9 +1172,8 @@ with tab3:
         elif server_status == "offline":
             st.error("🔴 无法连接到 GPU 服务器 (请联系管理员)")
 
-        # 3. 数据准备区
         st.markdown("#### 1. 数据准备")
-        # 读取本地已积累的微调数据
+        
         if PATHS.training_file.exists():
             with open(PATHS.training_file, "r", encoding="utf-8") as f:
                 lines = f.readlines()
@@ -860,27 +1181,21 @@ with tab3:
         else:
             data_count = 0
             
-        st.info(f"当前积累判例数据：**{data_count} 条**")
+        st.info(f"当前微调数据：**{data_count} 条** | 判例库：**{len(st.session_state.cases[1])} 条**")
         
-        # 将判例库转为微调数据的按钮 (保持原逻辑)
-        if st.button("🔄 将当前所有判例转为微调数据"):
-            cnt = 0
-            # 清空旧文件，避免重复? 或者追加? 这里保持追加逻辑，但在UI提示
-            for c in st.session_state.cases[1]:
-                if ResourceManager.append_to_finetune(
-                    c["text"], 
-                    c["scores"], 
-                    st.session_state.prompt_config.get('system_template',''), 
-                    st.session_state.prompt_config.get('user_template','')
-                ): 
-                    cnt += 1
-            st.success(f"已合并 {cnt} 条判例到训练集！当前总数: {data_count + cnt}")
+        # ===== 修改：覆盖逻辑 =====
+        if st.button("🔄 将当前所有判例转为微调数据（覆盖）"):
+            cnt = ResourceManager.overwrite_finetune(
+                st.session_state.cases[1],
+                st.session_state.prompt_config.get('system_template',''), 
+                st.session_state.prompt_config.get('user_template','')
+            )
+            st.success(f"已覆盖写入 {cnt} 条微调数据！")
             time.sleep(1); st.rerun()
 
         st.markdown("#### 2. 启动训练")
         st.caption("点击下方按钮将把数据上传至 GPU 服务器并开始训练。训练期间服务将中断约 2-5 分钟。")
 
-        # 只有在服务器空闲且有数据时才允许点击
         btn_disabled = (server_status != "idle") or (data_count == 0)
         
         if st.button("🔥 开始微调 (Start LoRA)", type="primary", disabled=btn_disabled):
@@ -889,7 +1204,6 @@ with tab3:
             else:
                 try:
                     with open(PATHS.training_file, "rb") as f:
-                        # 发送 POST 请求上传文件
                         with st.spinner("正在上传数据并启动训练任务..."):
                             files = {'file': ('tea_feedback.jsonl', f, 'application/json')}
                             r = requests.post(f"{MANAGER_URL}/upload_and_train", files=files, timeout=100)
@@ -902,7 +1216,8 @@ with tab3:
                             st.error(f"❌ 提交失败: {r.text}")
                 except Exception as e:
                     st.error(f"❌ 连接错误: {e}")
-    
+
+# --- Tab 4: Prompt配置 ---
 with tab4:
     pc = st.session_state.prompt_config
     st.markdown("系统提示词**可以修改**。完整全面的提示词会让大语言模型返回的更准确结果。")    
@@ -917,8 +1232,6 @@ with tab4:
             new_cfg = {"system_template": sys_t, "user_template": user_t}
             
             with st.spinner("正在连接 Github 仓库并写入数据..."):
-                # === 这里直接调用我们在前面定义的静态方法 ===
-                # 注意：第一个参数是你在 Github 仓库里的相对路径
                 success = GithubSync.push_json(
                     file_path_in_repo="tea_data/prompts.json", 
                     data_dict=new_cfg,
@@ -926,8 +1239,7 @@ with tab4:
                 )
             
             if success:
-                st.success("✅ 成功写入 Github！App 将在几秒后自动刷新。")
-                # 更新 Session 和 本地临时文件
+                st.success("✅ 成功写入 Github！")
                 st.session_state.prompt_config = new_cfg
                 with open(PATHS.prompt_config_file, 'w', encoding='utf-8') as f:
                     json.dump(new_cfg, f, ensure_ascii=False, indent=2)
