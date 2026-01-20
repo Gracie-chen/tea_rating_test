@@ -625,7 +625,7 @@ class EvaluationLogger:
 
 class AliyunEmbedder:
     def __init__(self, api_key):
-        self.model_name = "Qwen-Embedding"
+        self.model_name = "text-embedding-v3"
         dashscope.api_key = api_key # 确保 API KEY 被正确设置给全局
         
     def encode(self, texts: List[str]) -> np.ndarray:
@@ -2020,6 +2020,7 @@ with tab6:
     
     
     
+
 
 
 
