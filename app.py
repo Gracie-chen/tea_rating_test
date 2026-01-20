@@ -711,40 +711,40 @@ def llm_normalize_user_input(raw_query: str, client: OpenAI) -> str:
 
 def run_scoring(text: str, kb_res: Tuple, case_res: Tuple, prompt_cfg: Dict, embedder: AliyunEmbedder, client: OpenAI, model_id: str, k_num: int, c_num: int):
     """执行 RAG 检索与 LLM 评分"""
-        vec = embedder.encode([text])
+    vec = embedder.encode([text])
 
-        # --- KB ---
-        ctx_txt, hits = "（无手册资料）", []
-        if kb_res[0].ntotal > 0:
-            _, idx = kb_res[0].search(vec, k_num)
-            hits = [kb_res[1][i] for i in idx[0] if i < len(kb_res[1])]
-            ctx_txt = "\n".join([f"- {h[:200]}..." for h in hits])
-    
-        # --- CASES ---
-        case_txt, found_cases = "", []
-        if case_res[0].ntotal > 0:
-            _, idx = case_res[0].search(vec, c_num)
-            for i in idx[0]:
-                if 0 <= i < len(case_res[1]):
-                    c = case_res[1][i]
-                    found_cases.append(c)
-    
-                    score_details = []
-                    for factor, info in c.get("scores", {}).items():
-                        if isinstance(info, dict):
-                            score_details.append(
-                                f"{factor}: {info.get('score')}分 (理由: {info.get('comment', '无')})"
-                            )
-                    scores_str = " | ".join(score_details)
-    
-                    case_txt += (
-                        f"\n---\n"
-                        f"【参考判例文本】: {c.get('text','')}\n"
-                        f"【参考评分逻辑】: {scores_str}\n"
-                    )
-    
-        if not found_cases:
-            case_txt = "（无相似判例）"
+    # --- KB ---
+    ctx_txt, hits = "（无手册资料）", []
+    if kb_res[0].ntotal > 0:
+        _, idx = kb_res[0].search(vec, k_num)
+        hits = [kb_res[1][i] for i in idx[0] if i < len(kb_res[1])]
+        ctx_txt = "\n".join([f"- {h[:200]}..." for h in hits])
+
+    # --- CASES ---
+    case_txt, found_cases = "", []
+    if case_res[0].ntotal > 0:
+        _, idx = case_res[0].search(vec, c_num)
+        for i in idx[0]:
+            if 0 <= i < len(case_res[1]):
+                c = case_res[1][i]
+                found_cases.append(c)
+
+                score_details = []
+                for factor, info in c.get("scores", {}).items():
+                    if isinstance(info, dict):
+                        score_details.append(
+                            f"{factor}: {info.get('score')}分 (理由: {info.get('comment', '无')})"
+                        )
+                scores_str = " | ".join(score_details)
+
+                case_txt += (
+                    f"\n---\n"
+                    f"【参考判例文本】: {c.get('text','')}\n"
+                    f"【参考评分逻辑】: {scores_str}\n"
+                )
+
+    if not found_cases:
+        case_txt = "（无相似判例）"
 
     sys_p = prompt_cfg.get('system_template', "")
     user_p = prompt_cfg.get('user_template', "").format(product_desc=text, context_text=ctx_txt, case_text=case_txt)
@@ -1811,6 +1811,7 @@ with tab5:
                 st.session_state.prompt_config = new_cfg
                 with open(PATHS.prompt_config_file, 'w', encoding='utf-8') as f:
                     json.dump(new_cfg, f, ensure_ascii=False, indent=2)
+
 
 
 
