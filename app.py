@@ -1163,8 +1163,14 @@ with st.sidebar:
     st.markdown("---")
     st.markdown(f"**预处理模型：** `Deepseek-chat`")
     st.markdown(f"**评分模型：** `Qwen2.5-7B-Instruct`")
-    model_id = "Qwen2.5-7B-Instruct"
-    
+    model_id = "Qwen2.5-7B-Instruct"  # 默认
+    try:
+        resp = requests.get("http://117.50.89.74:8001/status", timeout=2)
+        if resp.status_code == 200 and resp.json().get("lora_available"):
+            model_id = "default_lora"
+            st.success("🎉 已启用微调模型")
+    except:
+        pass
     ft_status = ResourceManager.load_ft_status()
     if ft_status and ft_status.get("status") == "succeeded":
         st.info(f"🎉 发现微调模型：`{ft_status.get('fine_tuned_model')}`")
@@ -1667,4 +1673,5 @@ with tab5:
                 st.session_state.prompt_config = new_cfg
                 with open(PATHS.prompt_config_file, 'w', encoding='utf-8') as f:
                     json.dump(new_cfg, f, ensure_ascii=False, indent=2)
+
 
