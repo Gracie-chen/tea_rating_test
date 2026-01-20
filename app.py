@@ -1448,8 +1448,7 @@ with tab1:
 
             with st.spinner("同步数据到云端记忆模块..."):
                 # 1. 存入判例库 (原有逻辑)
-                st.session_state.get("current_user_input", user_input)
-                nc = {"text": current_user_input, "scores": cal_scores, "tags": "交互-校准", "master_comment": cal_master, "created_at": time.strftime("%Y-%m-%d")}
+                nc = {"text": st.session_state.get("current_user_input", user_input), "scores": cal_scores, "tags": "交互-校准", "master_comment": cal_master, "created_at": time.strftime("%Y-%m-%d")}
                 st.session_state.cases[1].append(nc)
                 st.session_state.cases[0].add(embedder.encode([user_input]))
                 ResourceManager.save(st.session_state.cases[0], st.session_state.cases[1], PATHS.case_index, PATHS.case_data, is_json=True)
@@ -1457,7 +1456,7 @@ with tab1:
                 
                 # 2. 存入评测日志 (新增逻辑：LLM-as-a-judge 的原料)
                 EvaluationLogger.log_evaluation(
-                    text= current_user_input, 
+                    text= st.session_state.get("current_user_input", user_input), 
                     model_output=ai_package, 
                     expert_output=expert_package
                 )
@@ -1779,6 +1778,7 @@ with tab5:
                 st.session_state.prompt_config = new_cfg
                 with open(PATHS.prompt_config_file, 'w', encoding='utf-8') as f:
                     json.dump(new_cfg, f, ensure_ascii=False, indent=2)
+
 
 
 
