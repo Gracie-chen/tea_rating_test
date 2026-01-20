@@ -534,16 +534,73 @@ class GithubSync:
             traceback.print_exc()
             return []
 
+# --- [新增] 日志与评测管理类 ---
+class EvaluationLogger:
+    FILE_NAME = "eval_logs.json"
 
+    @staticmethod
+    def load_logs():
+        """从 GitHub 同步并加载日志"""
+        content = GithubSync.load_json(EvaluationLogger.FILE_NAME)
+        return content if content else []
+
+    @staticmethod
+    def log_evaluation(text, model_output, expert_output, model_name="Qwen2.5-7B-Instruct"):
+        """
+        核心：同时记录 AI 的原始输出和专家的校准结果
+        """
+        logs = EvaluationLogger.load_logs()
+        new_entry = {
+            "id": str(int(time.time())),
+            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "input_text": text,
+            "model_prediction": model_output, # 原始预测包 (scores + master_comment)
+            "expert_ground_truth": expert_output, # 专家修正包 (scores + master_comment)
+            "analysis": None,
+            "meta": {"model": model_name}
+        }
+        logs.insert(0, new_entry) # 最新记录在前
+        if len(logs) > 500: logs = logs[:500] # 限制日志长度
+        GithubSync.push_json(EvaluationLogger.FILE_NAME, logs, f"Eval log {new_entry['id']}")
+        return logs
+
+    @staticmethod
+    def run_judge(log_id, llm_client):
+        """运行 LLM 裁判：分析 AI 为什么评错了"""
+        logs = EvaluationLogger.load_logs()
+        target = next((l for l in logs if l["id"] == log_id), None)
+        if not target or not target.get("expert_ground_truth"): return "缺少对比数据"
+
+        judge_prompt = f"""
+        你是一名茶叶感官审评专家教练。请对比以下“模型评分”与“专家标准评分”，分析差异原因。
+        【原始评语】: {target['input_text']}
+        【模型原始分】: {json.dumps(target['model_prediction'], ensure_ascii=False)}
+        【专家校准分】: {json.dumps(target['expert_ground_truth'], ensure_ascii=False)}
+        请输出简短的误差分析：
+        1. 哪些维度偏差较大？2. 模型误解了评语中的哪个关键描述？3. 针对此案例，应如何优化 Prompt？
+        """
+        try:
+            resp = llm_client.chat.completions.create(
+                model="deepseek-chat",
+                messages=[{"role": "user", "content": judge_prompt}]
+            )
+            analysis = resp.choices[0].message.content
+            # 更新日志并同步
+            for l in logs:
+                if l["id"] == log_id: l["analysis"] = analysis
+            GithubSync.push_json(EvaluationLogger.FILE_NAME, logs, f"Update judge {log_id}")
+            return analysis
+        except Exception as e:
+            return f"裁判分析失败: {str(e)}"
 # ==========================================
 # [SECTION 2] AI 服务 (Embedding & LLM)
 # ==========================================
 
 class AliyunEmbedder:
     def __init__(self, api_key):
-        self.model_name = "text-embedding-v4"
-        dashscope.api_key = api_key 
-
+        self.model_name = "text-embedding-v3"
+        dashscope.api_key = api_key # 确保 API KEY 被正确设置给全局
+        
     def encode(self, texts: List[str]) -> np.ndarray:
         if not texts: return np.zeros((0, 1024), dtype="float32")
         if isinstance(texts, str): texts = [texts]
@@ -1348,17 +1405,30 @@ with tab1:
                         "comment": st.text_area(f"评语", s[f]['comment'], key=f"c_{f}_{v}", height=80, placeholder="评语"),
                         "suggestion": st.text_area(f"建议", s[f].get('suggestion',''), key=f"sg_{f}_{v}", height=68, placeholder="建议")
                     }
-        
         if st.button("💾 保存校准评分", type="primary"):
-            nc = {"text": user_input, "scores": cal_scores, "tags": "交互-校准", "master_comment": cal_master, "created_at": time.strftime("%Y-%m-%d")}
-            st.session_state.cases[1].append(nc)
-            st.session_state.cases[0].add(embedder.encode([user_input]))
-            ResourceManager.save(st.session_state.cases[0], st.session_state.cases[1], PATHS.case_index, PATHS.case_data, is_json=True)
-       
-            with st.spinner("同步判例到GitHub..."):
+            # A. 构造专家数据包
+            expert_package = {"scores": cal_scores, "master_comment": cal_master}
+            # B. 构造 AI 数据包 (确保 st.session_state.last_scores 存在)
+            ai_package = st.session_state.last_scores
+
+            with st.spinner("同步数据到云端记忆模块..."):
+                # 1. 存入判例库 (原有逻辑)
+                nc = {"text": user_input, "scores": cal_scores, "tags": "交互-校准", "master_comment": cal_master, "created_at": time.strftime("%Y-%m-%d")}
+                st.session_state.cases[1].append(nc)
+                st.session_state.cases[0].add(embedder.encode([user_input]))
+                ResourceManager.save(st.session_state.cases[0], st.session_state.cases[1], PATHS.case_index, PATHS.case_data, is_json=True)
                 GithubSync.sync_cases(st.session_state.cases[1])
+                
+                # 2. 存入评测日志 (新增逻辑：LLM-as-a-judge 的原料)
+                EvaluationLogger.log_evaluation(
+                    text=user_input, 
+                    model_output=ai_package, 
+                    expert_output=expert_package
+                )
             
-            st.success("校准已保存并同步"); st.rerun()
+            st.success("校准已存入判例库，误差数据已归档！")
+            time.sleep(1)
+            st.rerun()
 
 # --- Tab 2: 批量评分 ---
 with tab2:
@@ -1673,6 +1743,7 @@ with tab5:
                 st.session_state.prompt_config = new_cfg
                 with open(PATHS.prompt_config_file, 'w', encoding='utf-8') as f:
                     json.dump(new_cfg, f, ensure_ascii=False, indent=2)
+
 
 
 
