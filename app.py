@@ -1451,6 +1451,7 @@ with tab1:
         
     st.subheader("🛠️ 评分校准与修正")
     v = st.session_state.score_version  # 获取当前版本号
+    mc = st.session_state.get("last_master_comment", "")
     cal_master = st.text_area("校准总评", mc, key=f"cal_master_{v}")
     cal_scores = {}
     st.write("分项调整")
@@ -1941,6 +1942,7 @@ with tab6:
     
     
     
+
 
 
 
