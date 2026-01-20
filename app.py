@@ -1488,42 +1488,42 @@ else:
 
 # --- Tab 2: 批量评分 ---
 with tab2:
-f = st.file_uploader("上传文件 (.txt/.docx)")
-c1, c2, c3, c4, c5 = st.columns([1, 3, 1, 3, 1])
-r_n = c2.number_input("参考知识库条目数量", 1, 20, 3, key="rb")
-c_n = c4.number_input("参考判例库条目数量", 1, 20, 2, key="cb")
-if f and st.button("批量处理"):
-    lines = [l.strip() for l in parse_file(f).split('\n') if len(l)>10]
-    res, bar = [], st.progress(0)
-    for i, l in enumerate(lines):
-        l = llm_normalize_user_input(l, client_d)
-        s, _, _ = run_scoring(l, st.session_state.kb, st.session_state.cases, st.session_state.prompt_config, embedder, client, "Qwen2.5-7B-Instruct", r_n, c_n)
-        res.append({"id":i+1, "text":l, "scores":s})
-        bar.progress((i+1)/len(lines))
-    st.success("完成")
-    st.download_button("下载Word", create_word_report(res), "report.docx")
-
-# --- Tab 3: RAG ---
+    f = st.file_uploader("上传文件 (.txt/.docx)")
+    c1, c2, c3, c4, c5 = st.columns([1, 3, 1, 3, 1])
+    r_n = c2.number_input("参考知识库条目数量", 1, 20, 3, key="rb")
+    c_n = c4.number_input("参考判例库条目数量", 1, 20, 2, key="cb")
+    if f and st.button("批量处理"):
+        lines = [l.strip() for l in parse_file(f).split('\n') if len(l)>10]
+        res, bar = [], st.progress(0)
+        for i, l in enumerate(lines):
+            l = llm_normalize_user_input(l, client_d)
+            s, _, _ = run_scoring(l, st.session_state.kb, st.session_state.cases, st.session_state.prompt_config, embedder, client, "Qwen2.5-7B-Instruct", r_n, c_n)
+            res.append({"id":i+1, "text":l, "scores":s})
+            bar.progress((i+1)/len(lines))
+        st.success("完成")
+        st.download_button("下载Word", create_word_report(res), "report.docx")
+    
+    # --- Tab 3: RAG ---
 with tab3:
-st.subheader("📚 知识库 (RAG)")
-st.caption("上传PDF/文档以增强模型回答的准确性。文件将同步到云端。")
-colu1, colu2 = st.columns([7,3])
-with colu1:
-    # ===== 显示GitHub上的RAG文件列表 =====
-    st.markdown("**📁 云端上的RAG文件：**")
-    
-    # 获取GitHub上的文件列表
-    if 'github_rag_files' not in st.session_state:
-        st.session_state.github_rag_files = []
-    
-    col_refresh, col_spacer = st.columns([1, 3])
-    with col_refresh:
-        if st.button("🔄 刷新列表", key="refresh_rag_list"):
-            with st.spinner("正在获取文件列表..."):
-                st.session_state.github_rag_files = GithubSync.list_rag_files()
-            st.rerun()
-    
-    github_files = st.session_state.github_rag_files
+    st.subheader("📚 知识库 (RAG)")
+    st.caption("上传PDF/文档以增强模型回答的准确性。文件将同步到云端。")
+    colu1, colu2 = st.columns([7,3])
+    with colu1:
+        # ===== 显示GitHub上的RAG文件列表 =====
+        st.markdown("**📁 云端上的RAG文件：**")
+        
+        # 获取GitHub上的文件列表
+        if 'github_rag_files' not in st.session_state:
+            st.session_state.github_rag_files = []
+        
+        col_refresh, col_spacer = st.columns([1, 3])
+        with col_refresh:
+            if st.button("🔄 刷新列表", key="refresh_rag_list"):
+                with st.spinner("正在获取文件列表..."):
+                    st.session_state.github_rag_files = GithubSync.list_rag_files()
+                st.rerun()
+        
+        github_files = st.session_state.github_rag_files
     if not github_files:
         # 首次加载时尝试获取
         github_files = GithubSync.list_rag_files()
@@ -1914,6 +1914,7 @@ else:
                         st.rerun()
             else:
                 st.info(l["analysis"])
+
 
 
 
