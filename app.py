@@ -1661,271 +1661,272 @@ with colu2:
 
 
 with tab4:
-MANAGER_URL = "http://117.50.89.74:8001"
-c1, c2 = st.columns([5, 5])
-
-with c1:
-    st.subheader("📕 判例库 (CASE)")        
-    if st.button("📋 展示当前判例", use_container_width=True):
-        show_cases_dialog(embedder)
+    MANAGER_URL = "http://117.50.89.74:8001"
+    c1, c2 = st.columns([5, 5])
     
-    # 检查是否需要打开编辑弹窗
-    if st.session_state.get('editing_case_idx') is not None:
-        edit_case_dialog(st.session_state.editing_case_idx, embedder)
-    
-    with st.expander("➕ 手动添加精细判例"):
-        with st.form("case_form"):
-            f_txt = st.text_area("判例描述", height=80)
-            f_tag = st.text_input("标签", "人工录入")
-            st.markdown("**因子评分详情**")
-            fc1, fc2 = st.columns(2)
-            factors = ["优雅性", "辨识度", "协调性", "饱和度", "持久性", "苦涩度"]
-            input_scores = {}
-            for i, f in enumerate(factors):
-                with (fc1 if i%2==0 else fc2):
-                    val = st.number_input(f"{f}分数", 0,9,7, key=f"s_{i}")
-                    cmt = st.text_input(f"{f}评语", key=f"c_{i}")
-                    sug = st.text_input(f"{f}建议", key=f"a_{i}")
-                    input_scores[f] = {"score": val, "comment": cmt, "suggestion": sug}
-            
-            if st.form_submit_button("保存判例并同步"):
-                new_c = {"text": f_txt, "tags": f_tag, "scores": input_scores, "created_at": time.strftime("%Y-%m-%d")}
-                st.session_state.cases[1].append(new_c)
-                vec = embedder.encode([f_txt])
-                st.session_state.cases[0].add(vec)
-                ResourceManager.save(st.session_state.cases[0], st.session_state.cases[1], PATHS.case_index, PATHS.case_data, is_json=True)
-                
-                # 同步到GitHub
-                with st.spinner("同步到GitHub..."):
-                    GithubSync.sync_cases(st.session_state.cases[1])
-                
-                st.success("已保存并同步！")
-                time.sleep(1); st.rerun()
-
-# --- 右侧：微调控制 ---
-with c2:
-    st.subheader("🚀 模型微调 (LoRA)")
-    
-    server_status = "unknown"
-    try:
-        resp = requests.get(f"{MANAGER_URL}/status", timeout=2)
-        if resp.status_code == 200:
-            status_data = resp.json()
-            if status_data.get("vllm_status") == "running":
-                server_status = "idle"
-            else:
-                server_status = "training"
-        else:
-            server_status = "error"
-    except:
-        server_status = "offline"
-    
-    if server_status == "idle":
-        st.success("🟢 服务器就绪 (正在进行推理服务)")
-    elif server_status == "training":
-        st.warning("🟠 正在微调训练中... (推理服务暂停)")
-        st.markdown("⚠️ **注意：** 此时无法进行评分交互，请耐心等待训练完成。")
-    elif server_status == "offline":
-        st.error("🔴 无法连接到 GPU 服务器 (请联系管理员)")
-
-    st.markdown("#### 1. 数据准备")
-    
-    if PATHS.training_file.exists():
-        with open(PATHS.training_file, "r", encoding="utf-8") as f:
-            lines = f.readlines()
-        data_count = len(lines)
-    else:
-        data_count = 0
+    with c1:
+        st.subheader("📕 判例库 (CASE)")        
+        if st.button("📋 展示当前判例", use_container_width=True):
+            show_cases_dialog(embedder)
         
-    st.info(f"当前微调数据：**{data_count} 条** | 判例库：**{len(st.session_state.cases[1])} 条**")
+        # 检查是否需要打开编辑弹窗
+        if st.session_state.get('editing_case_idx') is not None:
+            edit_case_dialog(st.session_state.editing_case_idx, embedder)
+        
+        with st.expander("➕ 手动添加精细判例"):
+            with st.form("case_form"):
+                f_txt = st.text_area("判例描述", height=80)
+                f_tag = st.text_input("标签", "人工录入")
+                st.markdown("**因子评分详情**")
+                fc1, fc2 = st.columns(2)
+                factors = ["优雅性", "辨识度", "协调性", "饱和度", "持久性", "苦涩度"]
+                input_scores = {}
+                for i, f in enumerate(factors):
+                    with (fc1 if i%2==0 else fc2):
+                        val = st.number_input(f"{f}分数", 0,9,7, key=f"s_{i}")
+                        cmt = st.text_input(f"{f}评语", key=f"c_{i}")
+                        sug = st.text_input(f"{f}建议", key=f"a_{i}")
+                        input_scores[f] = {"score": val, "comment": cmt, "suggestion": sug}
+                
+                if st.form_submit_button("保存判例并同步"):
+                    new_c = {"text": f_txt, "tags": f_tag, "scores": input_scores, "created_at": time.strftime("%Y-%m-%d")}
+                    st.session_state.cases[1].append(new_c)
+                    vec = embedder.encode([f_txt])
+                    st.session_state.cases[0].add(vec)
+                    ResourceManager.save(st.session_state.cases[0], st.session_state.cases[1], PATHS.case_index, PATHS.case_data, is_json=True)
+                    
+                    # 同步到GitHub
+                    with st.spinner("同步到GitHub..."):
+                        GithubSync.sync_cases(st.session_state.cases[1])
+                    
+                    st.success("已保存并同步！")
+                    time.sleep(1); st.rerun()
     
-    # ===== 修改：覆盖逻辑 =====
-    if st.button("🔄 将当前所有判例转为微调数据（覆盖）"):
-        cnt = ResourceManager.overwrite_finetune(
-            st.session_state.cases[1],
-            st.session_state.prompt_config.get('system_template',''), 
-            st.session_state.prompt_config.get('user_template','')
-        )
-        st.success(f"已覆盖写入 {cnt} 条微调数据！")
-        time.sleep(1); st.rerun()
-
-    st.markdown("#### 2. 启动训练")
-    st.caption("点击下方按钮将把数据上传至 GPU 服务器并开始训练。训练期间服务将中断约 2-5 分钟。")
-
-    btn_disabled = (server_status != "idle") or (data_count == 0)
+    # --- 右侧：微调控制 ---
+    with c2:
+        st.subheader("🚀 模型微调 (LoRA)")
+        
+        server_status = "unknown"
+        try:
+            resp = requests.get(f"{MANAGER_URL}/status", timeout=2)
+            if resp.status_code == 200:
+                status_data = resp.json()
+                if status_data.get("vllm_status") == "running":
+                    server_status = "idle"
+                else:
+                    server_status = "training"
+            else:
+                server_status = "error"
+        except:
+            server_status = "offline"
+        
+        if server_status == "idle":
+            st.success("🟢 服务器就绪 (正在进行推理服务)")
+        elif server_status == "training":
+            st.warning("🟠 正在微调训练中... (推理服务暂停)")
+            st.markdown("⚠️ **注意：** 此时无法进行评分交互，请耐心等待训练完成。")
+        elif server_status == "offline":
+            st.error("🔴 无法连接到 GPU 服务器 (请联系管理员)")
     
-    if st.button("🔥 开始微调 (Start LoRA)", type="primary", disabled=btn_disabled):
-        if not PATHS.training_file.exists():
-            st.error("找不到训练数据文件！")
+        st.markdown("#### 1. 数据准备")
+        
+        if PATHS.training_file.exists():
+            with open(PATHS.training_file, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+            data_count = len(lines)
         else:
-            try:
-                with open(PATHS.training_file, "rb") as f:
-                    with st.spinner("正在上传数据并启动训练任务..."):
-                        files = {'file': ('tea_feedback.jsonl', f, 'application/json')}
-                        r = requests.post(f"{MANAGER_URL}/upload_and_train", files=files, timeout=100)
-                        
-                    if r.status_code == 200:
-                        st.balloons()
-                        st.success(f"✅ 任务已提交！服务器响应: {r.json().get('message')}")
-                        st.info("💡 你可以稍后刷新页面查看状态，训练完成后服务会自动恢复。")
-                    else:
-                        st.error(f"❌ 提交失败: {r.text}")
-            except Exception as e:
-                st.error(f"❌ 连接错误: {e}")
+            data_count = 0
+            
+        st.info(f"当前微调数据：**{data_count} 条** | 判例库：**{len(st.session_state.cases[1])} 条**")
+        
+        # ===== 修改：覆盖逻辑 =====
+        if st.button("🔄 将当前所有判例转为微调数据（覆盖）"):
+            cnt = ResourceManager.overwrite_finetune(
+                st.session_state.cases[1],
+                st.session_state.prompt_config.get('system_template',''), 
+                st.session_state.prompt_config.get('user_template','')
+            )
+            st.success(f"已覆盖写入 {cnt} 条微调数据！")
+            time.sleep(1); st.rerun()
+    
+        st.markdown("#### 2. 启动训练")
+        st.caption("点击下方按钮将把数据上传至 GPU 服务器并开始训练。训练期间服务将中断约 2-5 分钟。")
+    
+        btn_disabled = (server_status != "idle") or (data_count == 0)
+        
+        if st.button("🔥 开始微调 (Start LoRA)", type="primary", disabled=btn_disabled):
+            if not PATHS.training_file.exists():
+                st.error("找不到训练数据文件！")
+            else:
+                try:
+                    with open(PATHS.training_file, "rb") as f:
+                        with st.spinner("正在上传数据并启动训练任务..."):
+                            files = {'file': ('tea_feedback.jsonl', f, 'application/json')}
+                            r = requests.post(f"{MANAGER_URL}/upload_and_train", files=files, timeout=100)
+                            
+                        if r.status_code == 200:
+                            st.balloons()
+                            st.success(f"✅ 任务已提交！服务器响应: {r.json().get('message')}")
+                            st.info("💡 你可以稍后刷新页面查看状态，训练完成后服务会自动恢复。")
+                        else:
+                            st.error(f"❌ 提交失败: {r.text}")
+                except Exception as e:
+                    st.error(f"❌ 连接错误: {e}")
 
 # --- Tab 4: Prompt配置 ---
 with tab5:
-pc = st.session_state.prompt_config
-st.markdown("系统提示词**可以修改**。完整全面的提示词会让大语言模型返回的更准确结果。")    
-sys_t = st.text_area("系统提示词", pc.get('system_template',''), height=350)
-st.markdown("用户提示词**不可修改**。其保证了发送内容与回答内容的基本结构，因此大语言模型的回答可被准确解析。")
-user_t = st.text_area("用户提示词", pc.get('user_template',''), height=250, disabled=True)
-
-if st.button("💾 保存（永久化同步）", type="primary"):
-    if sys_t == pc.get('system_template'):
-        st.info("内容没有变化，无需保存。")
-    else:
-        new_cfg = {"system_template": sys_t, "user_template": user_t}
-        
-        with st.spinner("正在连接云端仓库并写入数据..."):
-            success = GithubSync.push_json(
-                file_path_in_repo="tea_data/prompts.json", 
-                data_dict=new_cfg,
-                commit_msg="Update prompts.json from App"
-            )
-        
-        if success:
-            st.success("✅ 成功写入云端！")
-            st.session_state.prompt_config = new_cfg
-            with open(PATHS.prompt_config_file, 'w', encoding='utf-8') as f:
-                json.dump(new_cfg, f, ensure_ascii=False, indent=2)
+    pc = st.session_state.prompt_config
+    st.markdown("系统提示词**可以修改**。完整全面的提示词会让大语言模型返回的更准确结果。")    
+    sys_t = st.text_area("系统提示词", pc.get('system_template',''), height=350)
+    st.markdown("用户提示词**不可修改**。其保证了发送内容与回答内容的基本结构，因此大语言模型的回答可被准确解析。")
+    user_t = st.text_area("用户提示词", pc.get('user_template',''), height=250, disabled=True)
+    
+    if st.button("💾 保存（永久化同步）", type="primary"):
+        if sys_t == pc.get('system_template'):
+            st.info("内容没有变化，无需保存。")
+        else:
+            new_cfg = {"system_template": sys_t, "user_template": user_t}
+            
+            with st.spinner("正在连接云端仓库并写入数据..."):
+                success = GithubSync.push_json(
+                    file_path_in_repo="tea_data/prompts.json", 
+                    data_dict=new_cfg,
+                    commit_msg="Update prompts.json from App"
+                )
+            
+            if success:
+                st.success("✅ 成功写入云端！")
+                st.session_state.prompt_config = new_cfg
+                with open(PATHS.prompt_config_file, 'w', encoding='utf-8') as f:
+                    json.dump(new_cfg, f, ensure_ascii=False, indent=2)
 
 with tab6:
-st.header("🧠 模型效果量化与误差分析（基于日志）")
-
-logs = EvaluationLogger.load_logs() or []
-logs = [l for l in logs if isinstance(l, dict)]
-
-# 只统计有“专家真值”的样本
-paired = [
-    l for l in logs
-    if l.get("model_prediction") and l.get("expert_ground_truth")
-]
-
-total = len(logs)
-paired_n = len(paired)
-st.metric("日志总数", total)
-st.metric("可评估样本（有专家真值）", paired_n)
-
-if paired_n == 0:
-    st.info("暂无可量化的样本：需要先在交互评分里保存专家校准（expert_ground_truth）。")
-else:
-    # --- 计算指标 ---
-    per_factor_abs = {}   # factor -> list[abs_err]
-    per_factor_signed = {}# factor -> list[signed_err] (model - expert)
-    case_errors = []      # (total_abs_err, log_dict)
-
-    for l in paired:
-        m_scores = (l.get("model_prediction") or {}).get("scores", {}) or {}
-        e_scores = (l.get("expert_ground_truth") or {}).get("scores", {}) or {}
-
-        abs_list = []
-        for factor, m_item in m_scores.items():
-            e_item = e_scores.get(factor)
-            if not isinstance(m_item, dict) or not isinstance(e_item, dict):
-                continue
-            ms = m_item.get("score")
-            es = e_item.get("score")
-            if not isinstance(ms, (int, float)) or not isinstance(es, (int, float)):
-                continue
-
-            signed = ms - es
-            abs_err = abs(signed)
-
-            per_factor_abs.setdefault(factor, []).append(abs_err)
-            per_factor_signed.setdefault(factor, []).append(signed)
-            abs_list.append(abs_err)
-
-        # 该条样本的平均绝对误差（跨维度）
-        if abs_list:
-            case_errors.append((sum(abs_list) / len(abs_list), l))
-
-    # 总体 MAE（跨所有维度的平均绝对误差）
-    all_abs = [x for xs in per_factor_abs.values() for x in xs]
-    overall_mae = sum(all_abs) / len(all_abs) if all_abs else 0.0
-
-    # 方向性偏差：平均 (model - expert)
-    all_signed = [x for xs in per_factor_signed.values() for x in xs]
-    overall_bias = sum(all_signed) / len(all_signed) if all_signed else 0.0
-
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        st.metric("总体 MAE（分）", f"{overall_mae:.3f}")
-    with c2:
-        st.metric("总体偏差（model-expert）", f"{overall_bias:+.3f}")
-    with c3:
-        st.metric("校准覆盖率", f"{paired_n/total:.1%}" if total else "0%")
-
-    st.divider()
-
-    # --- 每维度指标 ---
-    st.subheader("📊 各维度误差（MAE）与偏差方向")
-    rows = []
-    for factor in sorted(per_factor_abs.keys()):
-        abs_errs = per_factor_abs[factor]
-        signed_errs = per_factor_signed.get(factor, [])
-        mae = sum(abs_errs) / len(abs_errs) if abs_errs else 0.0
-        bias = sum(signed_errs) / len(signed_errs) if signed_errs else 0.0
-        rows.append((factor, mae, bias, len(abs_errs)))
-
-    # 用 st.dataframe 展示（不依赖 pandas）
-    st.dataframe(
-        [{"factor": f, "mae": round(mae, 3), "bias(model-expert)": round(bias, 3), "n": n}
-         for (f, mae, bias, n) in rows],
-        use_container_width=True
-    )
-
-    st.divider()
-
-    # --- Top-N 误差样本定位 ---
-    st.subheader("🔎 误差最大样本 Top-N（用于定位问题）")
-    topn = st.slider("Top-N", min_value=3, max_value=30, value=10, step=1)
-
-    case_errors.sort(key=lambda x: x[0], reverse=True)
-    for rank, (err, l) in enumerate(case_errors[:topn], start=1):
-        ts = l.get("timestamp", "unknown")
-        txt = (l.get("input_text") or "")
-        title = f"#{rank} | 平均误差={err:.3f} | {ts} | 输入: {txt[:20]}..."
-        with st.expander(title):
-            col1, col2 = st.columns(2)
-            with col1:
-                st.caption("🤖 模型输出")
-                st.json(l.get("model_prediction", {}))
-            with col2:
-                st.caption("👨‍🏫 专家真值")
-                st.json(l.get("expert_ground_truth", {}))
-
-            # 可选：一键让 AI 写“差异原因分析”
-            if not l.get("analysis"):
-                if st.button("⚖️ 让 AI 分析差异原因（写入日志）", key=f"judge_{l.get('id','noid')}"):
-                    with st.spinner("AI 正在生成差异原因分析..."):
-                        EvaluationLogger.run_judge(l["id"], client_d)  # 你项目里一般叫 client_d
-                        st.success("完成，已写入日志 analysis 字段")
-                        st.rerun()
-            else:
-                st.info(l["analysis"])
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+    st.header("🧠 模型效果量化与误差分析（基于日志）")
+    
+    logs = EvaluationLogger.load_logs() or []
+    logs = [l for l in logs if isinstance(l, dict)]
+    
+    # 只统计有“专家真值”的样本
+    paired = [
+        l for l in logs
+        if l.get("model_prediction") and l.get("expert_ground_truth")
+    ]
+    
+    total = len(logs)
+    paired_n = len(paired)
+    st.metric("日志总数", total)
+    st.metric("可评估样本（有专家真值）", paired_n)
+    
+    if paired_n == 0:
+        st.info("暂无可量化的样本：需要先在交互评分里保存专家校准（expert_ground_truth）。")
+    else:
+        # --- 计算指标 ---
+        per_factor_abs = {}   # factor -> list[abs_err]
+        per_factor_signed = {}# factor -> list[signed_err] (model - expert)
+        case_errors = []      # (total_abs_err, log_dict)
+    
+        for l in paired:
+            m_scores = (l.get("model_prediction") or {}).get("scores", {}) or {}
+            e_scores = (l.get("expert_ground_truth") or {}).get("scores", {}) or {}
+    
+            abs_list = []
+            for factor, m_item in m_scores.items():
+                e_item = e_scores.get(factor)
+                if not isinstance(m_item, dict) or not isinstance(e_item, dict):
+                    continue
+                ms = m_item.get("score")
+                es = e_item.get("score")
+                if not isinstance(ms, (int, float)) or not isinstance(es, (int, float)):
+                    continue
+    
+                signed = ms - es
+                abs_err = abs(signed)
+    
+                per_factor_abs.setdefault(factor, []).append(abs_err)
+                per_factor_signed.setdefault(factor, []).append(signed)
+                abs_list.append(abs_err)
+    
+            # 该条样本的平均绝对误差（跨维度）
+            if abs_list:
+                case_errors.append((sum(abs_list) / len(abs_list), l))
+    
+        # 总体 MAE（跨所有维度的平均绝对误差）
+        all_abs = [x for xs in per_factor_abs.values() for x in xs]
+        overall_mae = sum(all_abs) / len(all_abs) if all_abs else 0.0
+    
+        # 方向性偏差：平均 (model - expert)
+        all_signed = [x for xs in per_factor_signed.values() for x in xs]
+        overall_bias = sum(all_signed) / len(all_signed) if all_signed else 0.0
+    
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            st.metric("总体 MAE（分）", f"{overall_mae:.3f}")
+        with c2:
+            st.metric("总体偏差（model-expert）", f"{overall_bias:+.3f}")
+        with c3:
+            st.metric("校准覆盖率", f"{paired_n/total:.1%}" if total else "0%")
+    
+        st.divider()
+    
+        # --- 每维度指标 ---
+        st.subheader("📊 各维度误差（MAE）与偏差方向")
+        rows = []
+        for factor in sorted(per_factor_abs.keys()):
+            abs_errs = per_factor_abs[factor]
+            signed_errs = per_factor_signed.get(factor, [])
+            mae = sum(abs_errs) / len(abs_errs) if abs_errs else 0.0
+            bias = sum(signed_errs) / len(signed_errs) if signed_errs else 0.0
+            rows.append((factor, mae, bias, len(abs_errs)))
+    
+        # 用 st.dataframe 展示（不依赖 pandas）
+        st.dataframe(
+            [{"factor": f, "mae": round(mae, 3), "bias(model-expert)": round(bias, 3), "n": n}
+             for (f, mae, bias, n) in rows],
+            use_container_width=True
+        )
+    
+        st.divider()
+    
+        # --- Top-N 误差样本定位 ---
+        st.subheader("🔎 误差最大样本 Top-N（用于定位问题）")
+        topn = st.slider("Top-N", min_value=3, max_value=30, value=10, step=1)
+    
+        case_errors.sort(key=lambda x: x[0], reverse=True)
+        for rank, (err, l) in enumerate(case_errors[:topn], start=1):
+            ts = l.get("timestamp", "unknown")
+            txt = (l.get("input_text") or "")
+            title = f"#{rank} | 平均误差={err:.3f} | {ts} | 输入: {txt[:20]}..."
+            with st.expander(title):
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.caption("🤖 模型输出")
+                    st.json(l.get("model_prediction", {}))
+                with col2:
+                    st.caption("👨‍🏫 专家真值")
+                    st.json(l.get("expert_ground_truth", {}))
+    
+                # 可选：一键让 AI 写“差异原因分析”
+                if not l.get("analysis"):
+                    if st.button("⚖️ 让 AI 分析差异原因（写入日志）", key=f"judge_{l.get('id','noid')}"):
+                        with st.spinner("AI 正在生成差异原因分析..."):
+                            EvaluationLogger.run_judge(l["id"], client_d)  # 你项目里一般叫 client_d
+                            st.success("完成，已写入日志 analysis 字段")
+                            st.rerun()
+                else:
+                    st.info(l["analysis"])
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
