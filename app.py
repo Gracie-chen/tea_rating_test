@@ -606,21 +606,21 @@ def run_scoring(text: str, kb_res: Tuple, case_res: Tuple, prompt_cfg: Dict, emb
     case_txt, found_cases = "（无相似判例）", []
     if case_res[0].ntotal > 0:
         _, idx = case_res[0].search(vec, c_num)
-            for i in idx[0]:
-                if i < len(case_res[1]) and i >= 0:
-                    c = case_res[1][i]
-                    found_cases.append(c)
-                    
-                    # 将该条 JSON 里的所有评分维度和评语都提取出来
-                    score_details = []
-                    for factor, info in c.get('scores', {}).items():
-                        if isinstance(info, dict):
-                            score_details.append(f"{factor}: {info.get('score')}分 (理由: {info.get('comment', '无')})")
-                    
-                    scores_str = " | ".join(score_details)
-                    
-                    # 构造一个更丰满的参考案例字符串
-                    case_txt += f"\n---\n【参考判例文本】: {c['text']}\n【参考评分逻辑】: {scores_str}\n"
+        for i in idx[0]:
+            if i < len(case_res[1]) and i >= 0:
+                c = case_res[1][i]
+                found_cases.append(c)
+                
+                # 将该条 JSON 里的所有评分维度和评语都提取出来
+                score_details = []
+                for factor, info in c.get('scores', {}).items():
+                    if isinstance(info, dict):
+                        score_details.append(f"{factor}: {info.get('score')}分 (理由: {info.get('comment', '无')})")
+                
+                scores_str = " | ".join(score_details)
+                
+                # 构造一个更丰满的参考案例字符串
+                case_txt += f"\n---\n【参考判例文本】: {c['text']}\n【参考评分逻辑】: {scores_str}\n"
 
     sys_p = prompt_cfg.get('system_template', "")
     user_p = prompt_cfg.get('user_template', "").format(product_desc=text, context_text=ctx_txt, case_text=case_txt)
@@ -1673,5 +1673,6 @@ with tab5:
                 st.session_state.prompt_config = new_cfg
                 with open(PATHS.prompt_config_file, 'w', encoding='utf-8') as f:
                     json.dump(new_cfg, f, ensure_ascii=False, indent=2)
+
 
 
