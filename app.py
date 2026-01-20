@@ -264,67 +264,35 @@ class GithubSync:
             st.error(f"Github 同步失败: {str(e)}")
             return False
     @staticmethod
-    def load_json(file_path_in_repo: str, default=None):
-        """从 Github 读取 JSON 文件并返回 dict/list；不存在则返回 default"""
-        if default is None:
-            default = []
+def load_json(file_path_in_repo: str, default=None):
+    """从 Github 读取 JSON 文件；不存在/读取失败则返回 default"""
+    if default is None:
+        default = []
 
-        g, repo_name, branch = GithubSync._get_github_client()
-        if not g or not repo_name:
+    g, repo_name, branch = GithubSync._get_github_client()
+    if not g or not repo_name:
+        return default
+
+    try:
+        repo = g.get_repo(repo_name)
+        contents = repo.get_contents(file_path_in_repo, ref=branch)
+        raw = contents.decoded_content.decode("utf-8").strip()
+        if not raw:
             return default
+        return json.loads(raw)
 
-        try:
-            repo = g.get_repo(repo_name)
-            contents = repo.get_contents(file_path_in_repo, ref=branch)
-
-            # PyGithub: contents.decoded_content 是 bytes
-            raw = contents.decoded_content.decode("utf-8")
-            return json.loads(raw) if raw.strip() else default
-
-        except GithubException as e:
-            # 404 = 远端文件不存在：返回空
-            if getattr(e, "status", None) == 404:
-                return default
-            st.error(f"Github 读取失败: {str(e)}")
+    except GithubException as e:
+        if getattr(e, "status", None) == 404:
             return default
+        st.error(f"Github 读取失败: {str(e)}")
+        return default
 
-        except Exception as e:
-            st.error(f"Github 读取失败: {str(e)}")
-            return default
-        @staticmethod
-        def load_json(file_path_in_repo: str, default=None):
-            """从 Github 读取 JSON 文件；不存在/读取失败则返回 default"""
-            if default is None:
-                default = []
-    
-            g, repo_name, branch = GithubSync._get_github_client()
-            if not g or not repo_name:
-                return default
-    
-            try:
-                repo = g.get_repo(repo_name)
-                contents = repo.get_contents(file_path_in_repo, ref=branch)
-    
-                raw = contents.decoded_content.decode("utf-8")
-                raw = raw.strip()
-                if not raw:
-                    return default
-                return json.loads(raw)
-    
-            except GithubException as e:
-                # 文件不存在
-                if getattr(e, "status", None) == 404:
-                    return default
-                st.error(f"Github 读取失败: {str(e)}")
-                return default
-    
-            except Exception as e:
-                st.error(f"Github 读取失败: {str(e)}")
-                return default
+    except Exception as e:
+        st.error(f"Github 读取失败: {str(e)}")
+        return default
 
-
-    @staticmethod
-    def push_binary_file(file_path_in_repo: str, file_content: bytes, commit_msg: str = "Upload file") -> bool:
+@staticmethod
+def push_binary_file(file_path_in_repo: str, file_content: bytes, commit_msg: str = "Upload file") -> bool:
         """推送二进制文件到 Github (如PDF, DOCX等)
         
         重要：PyGithub的create_file/update_file接受bytes类型时会自动进行base64编码
@@ -1428,28 +1396,35 @@ with tab1:
                 user_input = llm_normalize_user_input(user_input, client_d)
                 st.session_state.current_user_input = user_input
                 scores, kb_h, case_h = run_scoring(user_input, st.session_state.kb, st.session_state.cases, st.session_state.prompt_config, embedder, client, "Qwen2.5-7B-Instruct", r_num, c_num)
-                # ✅ Debug: 展示命中的判例（确认是否命中了那条全9分）
-                if case_h:
-                    st.subheader("🔍 Debug: 命中的判例（Top-K）")
-                    for j, c in enumerate(case_h[:c_num], start=1):
-                        st.markdown(f"**#{j}** {c.get('text','')[:80]}...")
-                        st.caption(" | ".join([f"{k}:{v.get('score')}" for k,v in (c.get('scores') or {}).items()]))
-                else:
-                    st.warning("Debug: 未命中任何判例（case_h 为空）")
 
-                if scores:
-                    st.session_state.last_scores = scores
-                    st.session_state.last_master_comment = scores.get("master_comment", "")
-                    
-                    # 递增版本号，使校准输入框使用新的key，从而显示新的默认值
-                    st.session_state.score_version += 1
-                    st.rerun()
+# ✅ 保存命中结果，避免 st.rerun() 后丢失
+st.session_state.last_case_hits = case_h
+st.session_state.last_kb_hits = kb_h
+
+if scores:
+    st.session_state.last_scores = scores
+    st.session_state.last_master_comment = scores.get("master_comment", "")
+
+    # 递增版本号，使校准输入框使用新的key，从而显示新的默认值
+    st.session_state.score_version += 1
+    st.rerun()
     
     if st.session_state.last_scores:
         s = st.session_state.last_scores["scores"]
         mc = st.session_state.last_master_comment
         st.markdown(f'<div class="master-comment"><b>👵 宗师总评：</b><br>{mc}</div>', unsafe_allow_html=True)
         
+
+# ✅ Debug: 展示本次命中的判例（rerun 后仍可见）
+case_h = st.session_state.get("last_case_hits", [])
+st.subheader("🔍 Debug: 命中的判例（Top-K）")
+if case_h:
+    for j, c in enumerate(case_h[:c_num], start=1):
+        st.markdown(f"**#{j}** {c.get('text','')[:80]}...")
+        st.caption(" | ".join([f"{k}:{v.get('score')}" for k,v in (c.get('scores') or {}).items()]))
+else:
+    st.warning("Debug: 未命中任何判例（case_h 为空）")
+
         left_col, right_col = st.columns([35, 65]) 
         with left_col:
             st.subheader("📊 风味形态")
