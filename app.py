@@ -1212,7 +1212,7 @@ def edit_case_dialog(case_idx: int, embedder: AliyunEmbedder):
             texts = [c["text"] for c in cases]
             vecs = embedder.encode(texts)
             faiss.normalize_L2(vecs)
-                new_idx.add(vecs)
+            new_idx.add(vecs)
             
             st.session_state.cases = (new_idx, cases)
             ResourceManager.save(new_idx, cases, PATHS.case_index, PATHS.case_data, is_json=True)
@@ -2002,6 +2002,7 @@ with tab6:
     
     
     
+
 
 
 
