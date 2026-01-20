@@ -1812,6 +1812,121 @@ with tab5:
                 with open(PATHS.prompt_config_file, 'w', encoding='utf-8') as f:
                     json.dump(new_cfg, f, ensure_ascii=False, indent=2)
 
+with tab6:
+    st.header("🧠 模型效果量化与误差分析（基于日志）")
+
+    logs = EvaluationLogger.load_logs() or []
+    logs = [l for l in logs if isinstance(l, dict)]
+
+    # 只统计有“专家真值”的样本
+    paired = [
+        l for l in logs
+        if l.get("model_prediction") and l.get("expert_ground_truth")
+    ]
+
+    total = len(logs)
+    paired_n = len(paired)
+    st.metric("日志总数", total)
+    st.metric("可评估样本（有专家真值）", paired_n)
+
+    if paired_n == 0:
+        st.info("暂无可量化的样本：需要先在交互评分里保存专家校准（expert_ground_truth）。")
+    else:
+        # --- 计算指标 ---
+        per_factor_abs = {}   # factor -> list[abs_err]
+        per_factor_signed = {}# factor -> list[signed_err] (model - expert)
+        case_errors = []      # (total_abs_err, log_dict)
+
+        for l in paired:
+            m_scores = (l.get("model_prediction") or {}).get("scores", {}) or {}
+            e_scores = (l.get("expert_ground_truth") or {}).get("scores", {}) or {}
+
+            abs_list = []
+            for factor, m_item in m_scores.items():
+                e_item = e_scores.get(factor)
+                if not isinstance(m_item, dict) or not isinstance(e_item, dict):
+                    continue
+                ms = m_item.get("score")
+                es = e_item.get("score")
+                if not isinstance(ms, (int, float)) or not isinstance(es, (int, float)):
+                    continue
+
+                signed = ms - es
+                abs_err = abs(signed)
+
+                per_factor_abs.setdefault(factor, []).append(abs_err)
+                per_factor_signed.setdefault(factor, []).append(signed)
+                abs_list.append(abs_err)
+
+            # 该条样本的平均绝对误差（跨维度）
+            if abs_list:
+                case_errors.append((sum(abs_list) / len(abs_list), l))
+
+        # 总体 MAE（跨所有维度的平均绝对误差）
+        all_abs = [x for xs in per_factor_abs.values() for x in xs]
+        overall_mae = sum(all_abs) / len(all_abs) if all_abs else 0.0
+
+        # 方向性偏差：平均 (model - expert)
+        all_signed = [x for xs in per_factor_signed.values() for x in xs]
+        overall_bias = sum(all_signed) / len(all_signed) if all_signed else 0.0
+
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            st.metric("总体 MAE（分）", f"{overall_mae:.3f}")
+        with c2:
+            st.metric("总体偏差（model-expert）", f"{overall_bias:+.3f}")
+        with c3:
+            st.metric("校准覆盖率", f"{paired_n/total:.1%}" if total else "0%")
+
+        st.divider()
+
+        # --- 每维度指标 ---
+        st.subheader("📊 各维度误差（MAE）与偏差方向")
+        rows = []
+        for factor in sorted(per_factor_abs.keys()):
+            abs_errs = per_factor_abs[factor]
+            signed_errs = per_factor_signed.get(factor, [])
+            mae = sum(abs_errs) / len(abs_errs) if abs_errs else 0.0
+            bias = sum(signed_errs) / len(signed_errs) if signed_errs else 0.0
+            rows.append((factor, mae, bias, len(abs_errs)))
+
+        # 用 st.dataframe 展示（不依赖 pandas）
+        st.dataframe(
+            [{"factor": f, "mae": round(mae, 3), "bias(model-expert)": round(bias, 3), "n": n}
+             for (f, mae, bias, n) in rows],
+            use_container_width=True
+        )
+
+        st.divider()
+
+        # --- Top-N 误差样本定位 ---
+        st.subheader("🔎 误差最大样本 Top-N（用于定位问题）")
+        topn = st.slider("Top-N", min_value=3, max_value=30, value=10, step=1)
+
+        case_errors.sort(key=lambda x: x[0], reverse=True)
+        for rank, (err, l) in enumerate(case_errors[:topn], start=1):
+            ts = l.get("timestamp", "unknown")
+            txt = (l.get("input_text") or "")
+            title = f"#{rank} | 平均误差={err:.3f} | {ts} | 输入: {txt[:20]}..."
+            with st.expander(title):
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.caption("🤖 模型输出")
+                    st.json(l.get("model_prediction", {}))
+                with col2:
+                    st.caption("👨‍🏫 专家真值")
+                    st.json(l.get("expert_ground_truth", {}))
+
+                # 可选：一键让 AI 写“差异原因分析”
+                if not l.get("analysis"):
+                    if st.button("⚖️ 让 AI 分析差异原因（写入日志）", key=f"judge_{l.get('id','noid')}"):
+                        with st.spinner("AI 正在生成差异原因分析..."):
+                            EvaluationLogger.run_judge(l["id"], client_d)  # 你项目里一般叫 client_d
+                            st.success("完成，已写入日志 analysis 字段")
+                            st.rerun()
+                else:
+                    st.info(l["analysis"])
+
 
 
 
