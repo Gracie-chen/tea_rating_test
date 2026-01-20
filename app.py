@@ -1743,36 +1743,6 @@ with tab5:
                 st.session_state.prompt_config = new_cfg
                 with open(PATHS.prompt_config_file, 'w', encoding='utf-8') as f:
                     json.dump(new_cfg, f, ensure_ascii=False, indent=2)
-                    
-# --- [新增] Tab 6: 记忆裁判界面 ---
-with tab6:
-    st.header("🧠 评测日志与 AI 裁判分析")
-    st.info("这里记录了 AI 的原始评分与您校准评分的差异。通过运行‘AI 裁判’，可以获得 Prompt 优化建议。")
-    
-    logs = EvaluationLogger.load_logs()
-    if not logs:
-        st.write("暂无日志，请先在‘首页’进行评分并保存校准。")
-    else:
-        for log in logs:
-            with st.expander(f"📝 {log['timestamp']} | {log['input_text'][:20]}...", expanded=False):
-                c1, c2 = st.columns(2)
-                with c1:
-                    st.subheader("🤖 AI 原始预测")
-                    st.json(log['model_prediction'])
-                with c2:
-                    st.subheader("👨‍🏫 专家校准结果")
-                    st.json(log['expert_ground_truth'])
-                
-                st.divider()
-                if log.get("analysis"):
-                    st.success("⚖️ AI 裁判误差分析：")
-                    st.write(log["analysis"])
-                else:
-                    if st.button("🔍 运行 AI 裁判分析", key=f"btn_{log['id']}"):
-                        with st.spinner("裁判正在读卷..."):
-                            analysis = EvaluationLogger.run_judge(log['id'], client) # 使用主程序的 client
-                            st.rerun()
-
 
 
 
