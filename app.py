@@ -1397,47 +1397,47 @@ with tab1:
                 st.session_state.current_user_input = user_input
                 scores, kb_h, case_h = run_scoring(user_input, st.session_state.kb, st.session_state.cases, st.session_state.prompt_config, embedder, client, "Qwen2.5-7B-Instruct", r_num, c_num)
 
-# ✅ 保存命中结果，避免 st.rerun() 后丢失
-st.session_state.last_case_hits = case_h
-st.session_state.last_kb_hits = kb_h
-
-if scores:
-    st.session_state.last_scores = scores
-    st.session_state.last_master_comment = scores.get("master_comment", "")
-
-    # 递增版本号，使校准输入框使用新的key，从而显示新的默认值
-    st.session_state.score_version += 1
-    st.rerun()
+    # ✅ 保存命中结果，避免 st.rerun() 后丢失
+    st.session_state.last_case_hits = case_h
+    st.session_state.last_kb_hits = kb_h
     
-    if st.session_state.last_scores:
-        s = st.session_state.last_scores["scores"]
-        mc = st.session_state.last_master_comment
-        st.markdown(f'<div class="master-comment"><b>👵 宗师总评：</b><br>{mc}</div>', unsafe_allow_html=True)
+    if scores:
+        st.session_state.last_scores = scores
+        st.session_state.last_master_comment = scores.get("master_comment", "")
+    
+        # 递增版本号，使校准输入框使用新的key，从而显示新的默认值
+        st.session_state.score_version += 1
+        st.rerun()
         
-
-# ✅ Debug: 展示本次命中的判例（rerun 后仍可见）
-case_h = st.session_state.get("last_case_hits", [])
-st.subheader("🔍 Debug: 命中的判例（Top-K）")
-if case_h:
-    for j, c in enumerate(case_h[:c_num], start=1):
-        st.markdown(f"**#{j}** {c.get('text','')[:80]}...")
-        st.caption(" | ".join([f"{k}:{v.get('score')}" for k,v in (c.get('scores') or {}).items()]))
-else:
-    st.warning("Debug: 未命中任何判例（case_h 为空）")
-
-    left_col, right_col = st.columns([35, 65]) 
-    with left_col:
-        st.subheader("📊 风味形态")
-        st.pyplot(plot_flavor_shape(st.session_state.last_scores), use_container_width=True)
-    with right_col:
-        cols = st.columns(2)
-        factors = ["优雅性", "辨识度", "协调性", "饱和度", "持久性", "苦涩度"]
-        for i, f in enumerate(factors):
-            if f in s:
-                d = s[f]
-                with cols[i%2]:
-                    st.markdown(f"""<div class="factor-card"><div class="score-header"><span>{f}</span><span>{d['score']}/9</span></div><div>{d['comment']}</div><div class="advice-tag">💡 {d.get('suggestion','')}</div></div>""", unsafe_allow_html=True)
+        if st.session_state.last_scores:
+            s = st.session_state.last_scores["scores"]
+            mc = st.session_state.last_master_comment
+            st.markdown(f'<div class="master-comment"><b>👵 宗师总评：</b><br>{mc}</div>', unsafe_allow_html=True)
+            
     
+    # ✅ Debug: 展示本次命中的判例（rerun 后仍可见）
+    case_h = st.session_state.get("last_case_hits", [])
+    st.subheader("🔍 Debug: 命中的判例（Top-K）")
+    if case_h:
+        for j, c in enumerate(case_h[:c_num], start=1):
+            st.markdown(f"**#{j}** {c.get('text','')[:80]}...")
+            st.caption(" | ".join([f"{k}:{v.get('score')}" for k,v in (c.get('scores') or {}).items()]))
+    else:
+        st.warning("Debug: 未命中任何判例（case_h 为空）")
+    
+        left_col, right_col = st.columns([35, 65]) 
+        with left_col:
+            st.subheader("📊 风味形态")
+            st.pyplot(plot_flavor_shape(st.session_state.last_scores), use_container_width=True)
+        with right_col:
+            cols = st.columns(2)
+            factors = ["优雅性", "辨识度", "协调性", "饱和度", "持久性", "苦涩度"]
+            for i, f in enumerate(factors):
+                if f in s:
+                    d = s[f]
+                    with cols[i%2]:
+                        st.markdown(f"""<div class="factor-card"><div class="score-header"><span>{f}</span><span>{d['score']}/9</span></div><div>{d['comment']}</div><div class="advice-tag">💡 {d.get('suggestion','')}</div></div>""", unsafe_allow_html=True)
+        
     st.subheader("🛠️ 评分校准与修正")
     v = st.session_state.score_version  # 获取当前版本号
     cal_master = st.text_area("校准总评", mc, key=f"cal_master_{v}")
@@ -1930,3 +1930,4 @@ with tab6:
     
     
     
+
