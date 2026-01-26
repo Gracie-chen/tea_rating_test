@@ -141,7 +141,7 @@ class ResourceManager:
                     data = json.load(f) if is_json else pickle.load(f)
                 return index, data
             except: pass
-        return faiss.IndexFlatL2(1024), []
+        return faiss.IndexFlatIP(1024), []
 
     # ===== 微调相关方法 =====
     @staticmethod
@@ -263,50 +263,77 @@ class GithubSync:
         except Exception as e:
             st.error(f"Github 同步失败: {str(e)}")
             return False
-
     @staticmethod
-    def push_binary_file(file_path_in_repo: str, file_content: bytes, commit_msg: str = "Upload file") -> bool:
-        """推送二进制文件到 Github (如PDF, DOCX等)
-        
-        重要：PyGithub的create_file/update_file接受bytes类型时会自动进行base64编码
-        不要手动编码，否则会导致双重编码！
-        """
+    def load_json(file_path_in_repo: str, default=None):
+        """从 Github 读取 JSON 文件；不存在/读取失败则返回 default"""
+        if default is None:
+            default = []
+    
         g, repo_name, branch = GithubSync._get_github_client()
-        
         if not g or not repo_name:
-            st.error("❌ 未配置 Github Token 或 仓库名")
-            return False
-
+            return default
+    
         try:
             repo = g.get_repo(repo_name)
-            # 注意：直接传bytes，PyGithub会自动base64编码
-            # 不要手动编码！否则会导致双重编码，文件损坏
+            contents = repo.get_contents(file_path_in_repo, ref=branch)
+            raw = contents.decoded_content.decode("utf-8").strip()
+            if not raw:
+                return default
+            return json.loads(raw)
+    
+        except GithubException as e:
+            if getattr(e, "status", None) == 404:
+                return default
+            st.error(f"Github 读取失败: {str(e)}")
+            return default
+    
+        except Exception as e:
+            st.error(f"Github 读取失败: {str(e)}")
+            return default
+    
+    @staticmethod
+    def push_binary_file(file_path_in_repo: str, file_content: bytes, commit_msg: str = "Upload file") -> bool:
+            """推送二进制文件到 Github (如PDF, DOCX等)
             
+            重要：PyGithub的create_file/update_file接受bytes类型时会自动进行base64编码
+            不要手动编码，否则会导致双重编码！
+            """
+            g, repo_name, branch = GithubSync._get_github_client()
+            
+            if not g or not repo_name:
+                st.error("❌ 未配置 Github Token 或 仓库名")
+                return False
+    
             try:
-                contents = repo.get_contents(file_path_in_repo, ref=branch)
-                repo.update_file(
-                    path=contents.path,
-                    message=commit_msg,
-                    content=file_content,  # 直接传bytes
-                    sha=contents.sha,
-                    branch=branch
-                )
-            except GithubException as e:
-                if e.status == 404:
-                    repo.create_file(
-                        path=file_path_in_repo,
-                        message=f"Create {file_path_in_repo}",
+                repo = g.get_repo(repo_name)
+                # 注意：直接传bytes，PyGithub会自动base64编码
+                # 不要手动编码！否则会导致双重编码，文件损坏
+                
+                try:
+                    contents = repo.get_contents(file_path_in_repo, ref=branch)
+                    repo.update_file(
+                        path=contents.path,
+                        message=commit_msg,
                         content=file_content,  # 直接传bytes
+                        sha=contents.sha,
                         branch=branch
                     )
-                else:
-                    raise e
-            return True
-
-        except Exception as e:
-            st.error(f"Github 文件上传失败: {str(e)}")
-            return False
-
+                except GithubException as e:
+                    if e.status == 404:
+                        repo.create_file(
+                            path=file_path_in_repo,
+                            message=f"Create {file_path_in_repo}",
+                            content=file_content,  # 直接传bytes
+                            branch=branch
+                        )
+                    else:
+                        raise e
+                return True
+    
+            except Exception as e:
+                st.error(f"Github 文件上传失败: {str(e)}")
+                return False
+    
     @staticmethod
     def delete_file(file_path_in_repo: str, commit_msg: str = "Delete file") -> bool:
         """从 Github 删除文件"""
@@ -534,7 +561,64 @@ class GithubSync:
             traceback.print_exc()
             return []
 
+# --- [新增] 日志与评测管理类 ---
+class EvaluationLogger:
+    FILE_NAME = "tea_data/eval_logs.json"
 
+    @staticmethod
+    def load_logs():
+        """从 GitHub 同步并加载日志"""
+        content = GithubSync.load_json(EvaluationLogger.FILE_NAME)
+        return content if content else []
+
+    @staticmethod
+    def log_evaluation(text, model_output, expert_output, model_name="Qwen2.5-7B-Instruct"):
+        """
+        核心：同时记录 AI 的原始输出和专家的校准结果
+        """
+        logs = EvaluationLogger.load_logs()
+        new_entry = {
+            "id": str(int(time.time())),
+            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "input_text": text,
+            "model_prediction": model_output, # 原始预测包 (scores + master_comment)
+            "expert_ground_truth": expert_output, # 专家修正包 (scores + master_comment)
+            "analysis": None,
+            "meta": {"model": model_name}
+        }
+        logs.insert(0, new_entry) # 最新记录在前
+        if len(logs) > 500: logs = logs[:500] # 限制日志长度
+        GithubSync.push_json(EvaluationLogger.FILE_NAME, logs, f"Eval log {new_entry['id']}")
+        return logs
+
+    @staticmethod
+    def run_judge(log_id, llm_client):
+        """运行 LLM 裁判：分析 AI 为什么评错了"""
+        logs = EvaluationLogger.load_logs()
+        target = next((l for l in logs if l["id"] == log_id), None)
+        if not target or not target.get("expert_ground_truth"): return "缺少对比数据"
+
+        judge_prompt = f"""
+        你是一名茶叶感官审评专家教练。请对比以下“模型评分”与“专家标准评分”，分析差异原因。
+        【原始评语】: {target['input_text']}
+        【模型原始分】: {json.dumps(target['model_prediction'], ensure_ascii=False)}
+        【专家校准分】: {json.dumps(target['expert_ground_truth'], ensure_ascii=False)}
+        请输出简短的误差分析：
+        1. 哪些维度偏差较大？2. 模型误解了评语中的哪个关键描述？3. 针对此案例，应如何优化 Prompt？
+        """
+        try:
+            resp = llm_client.chat.completions.create(
+                model="deepseek-chat",
+                messages=[{"role": "user", "content": judge_prompt}]
+            )
+            analysis = resp.choices[0].message.content
+            # 更新日志并同步
+            for l in logs:
+                if l["id"] == log_id: l["analysis"] = analysis
+            GithubSync.push_json(EvaluationLogger.FILE_NAME, logs, f"Update judge {log_id}")
+            return analysis
+        except Exception as e:
+            return f"裁判分析失败: {str(e)}"
 # ==========================================
 # [SECTION 2] AI 服务 (Embedding & LLM)
 # ==========================================
@@ -542,17 +626,77 @@ class GithubSync:
 class AliyunEmbedder:
     def __init__(self, api_key):
         self.model_name = "text-embedding-v4"
-        dashscope.api_key = api_key 
-
-    def encode(self, texts: List[str]) -> np.ndarray:
-        if not texts: return np.zeros((0, 1024), dtype="float32")
-        if isinstance(texts, str): texts = [texts]
+        dashscope.api_key = api_key # 确保 API KEY 被正确设置给全局
+        
+    def encode(self, texts: List[str], text_type: str = "document") -> np.ndarray:
+        if not texts:
+            return np.zeros((0, 1024), dtype="float32")
+        if isinstance(texts, str):
+            texts = [texts]
+    
         try:
-            resp = TextEmbedding.call(model=self.model_name, input=texts)
-            if resp.status_code == HTTPStatus.OK:
-                return np.array([i['embedding'] for i in resp.output['embeddings']]).astype("float32")
-        except: pass
-        return np.zeros((len(texts), 1024), dtype="float32")
+            resp = TextEmbedding.call(model=self.model_name, input=texts, text_type=text_type, dimension=1024)
+        except Exception as e:
+            # 关键：不要吞掉，否则检索会“永远不变”
+            raise RuntimeError(f"[Embedding] call failed: {type(e).__name__}: {e}")
+    
+        if resp.status_code != HTTPStatus.OK:
+            # 把错误信息暴露出来
+            msg = getattr(resp, "message", "")
+            raise RuntimeError(f"[Embedding] HTTP not OK: {resp.status_code}, message={msg}")
+    
+        vecs = np.array([i["embedding"] for i in resp.output["embeddings"]], dtype="float32")
+    
+        # 关键：检测全 0 / 常量向量（典型“检索永远一样”）
+        norms = np.linalg.norm(vecs, axis=1)
+        if np.any(norms < 1e-6):
+            raise RuntimeError("[Embedding] got near-zero vector(s). Check ALIYUN_API_KEY / dashscope / model availability.")
+    
+        return vecs
+
+
+def _ensure_ip_index_from_texts(texts, embedder):
+    """Build an IndexFlatIP (cosine via L2-normalized vectors) from texts."""
+    if not texts:
+        return faiss.IndexFlatIP(1024)
+    vecs = embedder.encode(texts).astype("float32")
+    # normalize for cosine similarity
+    faiss.normalize_L2(vecs)
+    dim = vecs.shape[1] if vecs.ndim == 2 and vecs.shape[0] > 0 else 1024
+    idx = faiss.IndexFlatIP(dim)
+    if vecs.shape[0] > 0:
+        idx.add(vecs)
+    return idx
+
+def ensure_case_index_cosine(embedder):
+    """Migrate / rebuild case index to cosine (IP + normalized vectors) if needed."""
+    case_idx, case_data = st.session_state.get("cases", (faiss.IndexFlatIP(1024), []))
+    # If empty, nothing to do
+    if not case_data:
+        st.session_state.cases = (faiss.IndexFlatIP(1024), case_data)
+        return
+
+    # If metric not IP or ntotal mismatch, rebuild
+    metric = getattr(case_idx, "metric_type", None)
+    if metric != faiss.METRIC_INNER_PRODUCT or case_idx.ntotal != len(case_data):
+        texts = [c.get("text", "") for c in case_data]
+        new_idx = _ensure_ip_index_from_texts(texts, embedder)
+        st.session_state.cases = (new_idx, case_data)
+        ResourceManager.save(new_idx, case_data, PATHS.case_index, PATHS.case_data, is_json=True)
+
+def ensure_kb_index_cosine(embedder):
+    """Migrate / rebuild kb index to cosine (IP + normalized vectors) if needed."""
+    kb_idx, kb_chunks = st.session_state.get("kb", (faiss.IndexFlatIP(1024), []))
+    if not kb_chunks:
+        st.session_state.kb = (faiss.IndexFlatIP(1024), kb_chunks)
+        return
+
+    metric = getattr(kb_idx, "metric_type", None)
+    if metric != faiss.METRIC_INNER_PRODUCT or kb_idx.ntotal != len(kb_chunks):
+        new_idx = _ensure_ip_index_from_texts(kb_chunks, embedder)
+        st.session_state.kb = (new_idx, kb_chunks)
+        ResourceManager.save(new_idx, kb_chunks, PATHS.kb_index, PATHS.kb_chunks)
+
 
 def llm_normalize_user_input(raw_query: str, client: OpenAI) -> str:
     """使用 LLM 对用户输入做语义规范化 / 去噪"""
@@ -595,25 +739,44 @@ def llm_normalize_user_input(raw_query: str, client: OpenAI) -> str:
 
 def run_scoring(text: str, kb_res: Tuple, case_res: Tuple, prompt_cfg: Dict, embedder: AliyunEmbedder, client: OpenAI, model_id: str, k_num: int, c_num: int):
     """执行 RAG 检索与 LLM 评分"""
-    vec = embedder.encode([text]) 
-    
+    vec = embedder.encode([text], text_type='query').astype('float32')
+    faiss.normalize_L2(vec)
+    # Debug：norm 应该约等于 1.0；如果不是，embedding 或 normalize 有问题
+    print(f"[DEBUG] query_vec_norm={float(np.linalg.norm(vec[0])):.6f}")
+
+    # --- KB ---
     ctx_txt, hits = "（无手册资料）", []
     if kb_res[0].ntotal > 0:
         _, idx = kb_res[0].search(vec, k_num)
         hits = [kb_res[1][i] for i in idx[0] if i < len(kb_res[1])]
         ctx_txt = "\n".join([f"- {h[:200]}..." for h in hits])
 
-    case_txt, found_cases = "（无相似判例）", []
+    # --- CASES ---
+    case_txt, found_cases = "", []
     if case_res[0].ntotal > 0:
         _, idx = case_res[0].search(vec, c_num)
         for i in idx[0]:
-            if i < len(case_res[1]) and i >= 0:
+            if 0 <= i < len(case_res[1]):
                 c = case_res[1][i]
                 found_cases.append(c)
-                sc = c.get('scores', {})
-                u_sc = sc.get('优雅性',{}).get('score', 0) if isinstance(sc,dict) and '优雅性' in sc else 0
-                k_sc = sc.get('苦涩度',{}).get('score', 0) if isinstance(sc,dict) and '苦涩度' in sc else 0
-                case_txt += f"\n参考案例: {c['text'][:30]}... -> 优雅性:{u_sc} 苦涩度:{k_sc}"
+
+                score_details = []
+                for factor, info in c.get("scores", {}).items():
+                    if isinstance(info, dict):
+                        score_details.append(
+                            f"{factor}: {info.get('score')}分 (理由: {info.get('comment', '无')})"
+                        )
+                scores_str = " | ".join(score_details)
+
+                case_txt += (
+                    f"\n---\n"
+                    f"【相似判例】: {c.get('text','')}\n"
+                    f"【该判例专家分】{scores_str}\n"
+                    f"【硬约束】如果待评分文本与该判例高度一致（语义基本相同），六因子分数应优先对齐该判例的专家分；只有明确出现相反描述时才允许偏离，并必须在comment里解释偏离原因。\n"
+                )
+
+    if not found_cases:
+        case_txt = "（无相似判例）"
 
     sys_p = prompt_cfg.get('system_template', "")
     user_p = prompt_cfg.get('user_template', "").format(product_desc=text, context_text=ctx_txt, case_text=case_txt)
@@ -762,6 +925,8 @@ def create_word_report(results: List[Dict]) -> BytesIO:
 
 def plot_flavor_shape(scores_data: Dict):
     """绘制风味形态图"""
+    if not scores_data or not isinstance(scores_data, dict) or "scores" not in scores_data:
+        return None  # 没有分数就不画图
     s = scores_data["scores"]
     top = (s["优雅性"]["score"] + s["辨识度"]["score"]) / 2
     mid = (s["协调性"]["score"] + s["饱和度"]["score"]) / 2
@@ -815,9 +980,18 @@ def bootstrap_seed_cases(embedder: AliyunEmbedder):
         return
 
     texts = [c["text"] for c in seed_cases]
-    vecs = embedder.encode(texts)
+    
+    all_vecs = []
+    batch_size = 10
+    for i in range(0, len(texts), batch_size):
+        batch = texts[i:i+batch_size]
+        vecs = embedder.encode(batch)
+        all_vecs.append(vecs)
+    
+    vecs = np.vstack(all_vecs)
+    faiss.normalize_L2(vecs)
 
-    if case_idx.ntotal == 0: case_idx = faiss.IndexFlatL2(1024)
+    if case_idx.ntotal == 0: case_idx = faiss.IndexFlatIP(1024)
     if len(vecs) > 0:
         case_idx.add(vecs)
         case_data.extend(seed_cases)
@@ -886,12 +1060,12 @@ def load_rag_from_github(aliyun_key: str) -> Tuple[bool, str]:
         # 4. 向量化并构建索引
         print("\n[INFO] 步骤 4/4: 向量化并构建 FAISS 索引...")
         temp_embedder = AliyunEmbedder(aliyun_key)
-        kb_idx = faiss.IndexFlatL2(1024)
+        kb_idx = faiss.IndexFlatIP(1024)
         
-        print(f"[INFO]   → 调用阿里云 Embedding API (批次大小: 25)...")
+        print(f"[INFO]   → 调用阿里云 Embedding API (批次大小: 10)...")
         
         # 分批向量化，避免 API 限制
-        batch_size = 25
+        batch_size = 10
         all_vecs = []
         for i in range(0, len(chunks), batch_size):
             batch = chunks[i:i+batch_size]
@@ -909,6 +1083,7 @@ def load_rag_from_github(aliyun_key: str) -> Tuple[bool, str]:
         
         vecs = np.vstack(all_vecs)
         print(f"[INFO]   ✓ 获得向量: {vecs.shape}")
+        faiss.normalize_L2(vecs)
         
         kb_idx.add(vecs)
         print(f"[INFO]   ✓ FAISS 索引构建完成 (共 {kb_idx.ntotal} 条)")
@@ -994,10 +1169,11 @@ def show_cases_dialog(embedder: AliyunEmbedder):
             new_cases = [c for i, c in enumerate(cases) if i not in selected_to_delete]
             
             # 重建FAISS索引
-            new_idx = faiss.IndexFlatL2(1024)
+            new_idx = faiss.IndexFlatIP(1024)
             if new_cases:
                 texts = [c["text"] for c in new_cases]
                 vecs = embedder.encode(texts)
+                faiss.normalize_L2(vecs)
                 new_idx.add(vecs)
             
             st.session_state.cases = (new_idx, new_cases)
@@ -1060,9 +1236,10 @@ def edit_case_dialog(case_idx: int, embedder: AliyunEmbedder):
             }
             
             # 重建FAISS索引（因为文本可能变了）
-            new_idx = faiss.IndexFlatL2(1024)
+            new_idx = faiss.IndexFlatIP(1024)
             texts = [c["text"] for c in cases]
             vecs = embedder.encode(texts)
+            faiss.normalize_L2(vecs)
             new_idx.add(vecs)
             
             st.session_state.cases = (new_idx, cases)
@@ -1096,6 +1273,8 @@ if 'loaded' not in st.session_state:
     print("[INFO] 步骤 1/3: 加载本地缓存数据...")
     kb_idx, kb_data = ResourceManager.load(PATHS.kb_index, PATHS.kb_chunks)
     case_idx, case_data = ResourceManager.load(PATHS.case_index, PATHS.case_data, is_json=True)
+    # (removed) case self-heal moved to cosine-migration helper after embedder init
+
     st.session_state.kb = (kb_idx, kb_data)
     st.session_state.cases = (case_idx, case_data)
     st.session_state.kb_files = ResourceManager.load_kb_files()
@@ -1182,6 +1361,9 @@ with st.sidebar:
     
     bootstrap_seed_cases(embedder)
     
+    # ✅ Ensure FAISS indices use cosine similarity (IP + normalized vectors)
+    ensure_case_index_cosine(embedder)
+    ensure_kb_index_cosine(embedder)
     st.markdown("---")
     
     # ===== 延迟加载 RAG 逻辑 =====
@@ -1276,7 +1458,7 @@ with st.sidebar:
 st.markdown('<div class="main-title">🍵 茶品六因子 AI 评分器 Pro</div>', unsafe_allow_html=True)
 st.markdown('<div class="slogan">"一片叶子落入水中，改变了水的味道..."</div>', unsafe_allow_html=True)
 
-tab1, tab2, tab3, tab4, tab5 = st.tabs(["💡 交互评分", "🚀 批量评分", "📕 知识库设计", "🛠️ 判例库与微调", "📲 提示词（Prompt）配置"])
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["💡 交互评分", "🚀 批量评分", "📕 知识库设计", "🛠️ 判例库与微调", "📲 提示词（Prompt）配置","测试日志"])
 
 # --- Tab 1: 交互评分 ---
 with tab1:
@@ -1296,70 +1478,116 @@ with tab1:
     # 用于生成动态key，确保每次新评分时校准输入框显示新内容
     if 'score_version' not in st.session_state:
         st.session_state.score_version = 0
-    
+        
     if st.button("开始评分", type="primary", use_container_width=True):
-        if not user_input: st.warning("请输入内容")
+        if not user_input:
+            st.warning("请输入内容")
         else:
-            with st.spinner(f"正在使用 {model_id} 品鉴..."):
+            with st.spinner(f"正在使用 {model_id} 品鉴."):
                 user_input = llm_normalize_user_input(user_input, client_d)
                 scores, kb_h, case_h = run_scoring(user_input, st.session_state.kb, st.session_state.cases, st.session_state.prompt_config, embedder, client, "deepseek-r1", r_num, c_num)
+                st.session_state.current_user_input = user_input
+    
+                scores, kb_h, case_h = run_scoring(
+                    user_input,
+                    st.session_state.kb,
+                    st.session_state.cases,
+                    st.session_state.prompt_config,
+                    embedder,
+                    client,
+                    "Qwen2.5-7B-Instruct",
+                    r_num,
+                    c_num
+                )
+    
+                # ✅ 只在这里保存：此时 case_h 一定已定义
+                st.session_state.last_case_hits = case_h or []
+                st.session_state.last_kb_hits = kb_h or []
+    
                 if scores:
                     st.session_state.last_scores = scores
                     st.session_state.last_master_comment = scores.get("master_comment", "")
-                    
-                    # 递增版本号，使校准输入框使用新的key，从而显示新的默认值
                     st.session_state.score_version += 1
                     st.rerun()
-    
-    if st.session_state.last_scores:
-        s = st.session_state.last_scores["scores"]
-        mc = st.session_state.last_master_comment
-        st.markdown(f'<div class="master-comment"><b>👵 宗师总评：</b><br>{mc}</div>', unsafe_allow_html=True)
-        
-        left_col, right_col = st.columns([35, 65]) 
-        with left_col:
-            st.subheader("📊 风味形态")
-            st.pyplot(plot_flavor_shape(st.session_state.last_scores), use_container_width=True)
-        with right_col:
-            cols = st.columns(2)
-            factors = ["优雅性", "辨识度", "协调性", "饱和度", "持久性", "苦涩度"]
-            for i, f in enumerate(factors):
-                if f in s:
-                    d = s[f]
-                    with cols[i%2]:
-                        st.markdown(f"""<div class="factor-card"><div class="score-header"><span>{f}</span><span>{d['score']}/9</span></div><div>{d['comment']}</div><div class="advice-tag">💡 {d.get('suggestion','')}</div></div>""", unsafe_allow_html=True)
-        
-        st.subheader("🛠️ 评分校准与修正")
-        v = st.session_state.score_version  # 获取当前版本号
-        cal_master = st.text_area("校准总评", mc, key=f"cal_master_{v}")
-        cal_scores = {}
-        st.write("分项调整")
-        active_factors = [f for f in factors if f in s]
-        grid_cols = st.columns(3) 
-        for i, f in enumerate(active_factors):
-            with grid_cols[i % 3]:
-                with st.container(border=True):
-                    t_col, s_col = st.columns([1, 1])
-                    with t_col:
-                        st.markdown(f"<div style='padding-top: 5px;'><b>📌 {f}</b></div>", unsafe_allow_html=True)
-                    with s_col:
-                        new_score = st.number_input("分数", 0, 9, int(s[f]['score']), 1, key=f"s_{f}_{v}", label_visibility="collapsed")
-                    cal_scores[f] = {
-                        "score": new_score,
-                        "comment": st.text_area(f"评语", s[f]['comment'], key=f"c_{f}_{v}", height=80, placeholder="评语"),
-                        "suggestion": st.text_area(f"建议", s[f].get('suggestion',''), key=f"sg_{f}_{v}", height=68, placeholder="建议")
-                    }
-        
-        if st.button("💾 保存校准评分", type="primary"):
-            nc = {"text": user_input, "scores": cal_scores, "tags": "交互-校准", "master_comment": cal_master, "created_at": time.strftime("%Y-%m-%d")}
-            st.session_state.cases[1].append(nc)
-            st.session_state.cases[0].add(embedder.encode([user_input]))
-            ResourceManager.save(st.session_state.cases[0], st.session_state.cases[1], PATHS.case_index, PATHS.case_data, is_json=True)
-       
-            with st.spinner("同步判例到GitHub..."):
-                GithubSync.sync_cases(st.session_state.cases[1])
+
+
+        if st.session_state.last_scores:
+            s = st.session_state.last_scores["scores"]
+            mc = st.session_state.last_master_comment
+            st.markdown(f'<div class="master-comment"><b>👵 宗师总评：</b><br>{mc}</div>', unsafe_allow_html=True)
             
-            st.success("校准已保存并同步"); st.rerun()
+
+    s = (st.session_state.last_scores or {}).get("scores", {}) or {}
+    mc = st.session_state.get("last_master_comment", "")
+    factors = ["优雅性", "辨识度", "协调性", "饱和度", "持久性", "苦涩度"]
+    left_col, right_col = st.columns([35, 65]) 
+    with left_col:
+        st.subheader("📊 风味形态")
+        fig = plot_flavor_shape(st.session_state.get("last_scores"))
+        if fig is not None:
+            st.pyplot(fig, use_container_width=True)
+        else:
+            st.info("暂无评分结果，无法绘制风味形态图。")
+
+    with right_col:
+        cols = st.columns(2)
+        factors = ["优雅性", "辨识度", "协调性", "饱和度", "持久性", "苦涩度"]
+        for i, f in enumerate(factors):
+            if f in s:
+                d = s[f]
+                with cols[i%2]:
+                    st.markdown(f"""<div class="factor-card"><div class="score-header"><span>{f}</span><span>{d['score']}/9</span></div><div>{d['comment']}</div><div class="advice-tag">💡 {d.get('suggestion','')}</div></div>""", unsafe_allow_html=True)
+    
+    st.subheader("🛠️ 评分校准与修正")
+    v = st.session_state.score_version  # 获取当前版本号
+    mc = st.session_state.get("last_master_comment", "")
+    cal_master = st.text_area("校准总评", mc, key=f"cal_master_{v}")
+    cal_scores = {}
+    st.write("分项调整")
+    active_factors = [f for f in factors if f in s]
+    grid_cols = st.columns(3) 
+    for i, f in enumerate(active_factors):
+        with grid_cols[i % 3]:
+            with st.container(border=True):
+                t_col, s_col = st.columns([1, 1])
+                with t_col:
+                    st.markdown(f"<div style='padding-top: 5px;'><b>📌 {f}</b></div>", unsafe_allow_html=True)
+                with s_col:
+                    new_score = st.number_input("分数", 0, 9, int(s[f]['score']), 1, key=f"s_{f}_{v}", label_visibility="collapsed")
+                cal_scores[f] = {
+                    "score": new_score,
+                    "comment": st.text_area(f"评语", s[f]['comment'], key=f"c_{f}_{v}", height=80, placeholder="评语"),
+                    "suggestion": st.text_area(f"建议", s[f].get('suggestion',''), key=f"sg_{f}_{v}", height=68, placeholder="建议")
+                }
+    if st.button("💾 保存校准评分", type="primary"):
+        # A. 构造专家数据包
+        expert_package = {"scores": cal_scores, "master_comment": cal_master}
+        # B. 构造 AI 数据包 (确保 st.session_state.last_scores 存在)
+        ai_package = st.session_state.last_scores
+
+        with st.spinner("同步数据到云端记忆模块..."):
+            # 1. 存入判例库 (原有逻辑)
+            nc_text = st.session_state.get("current_user_input", user_input)
+            nc = {"text": nc_text, "scores": cal_scores, "tags": "交互-校准", "master_comment": cal_master, "created_at": time.strftime("%Y-%m-%d")}
+            st.session_state.cases[1].append(nc)
+            
+            # ✅ embedding 与 nc["text"] 完全一致
+            v = embedder.encode([nc_text]).astype("float32")
+            faiss.normalize_L2(v)
+            st.session_state.cases[0].add(v)
+            ResourceManager.save(st.session_state.cases[0], st.session_state.cases[1], PATHS.case_index, PATHS.case_data, is_json=True)
+            GithubSync.sync_cases(st.session_state.cases[1])
+            
+            # 2. 存入评测日志 (新增逻辑：LLM-as-a-judge 的原料)
+            EvaluationLogger.log_evaluation(
+                text= st.session_state.get("current_user_input", user_input), 
+                model_output=ai_package, 
+                expert_output=expert_package
+            )
+        
+        st.success("校准已存入判例库，误差数据已归档！")
+        time.sleep(1)
+        st.rerun()
 
 # --- Tab 2: 批量评分 ---
 with tab2:
@@ -1377,8 +1605,8 @@ with tab2:
             bar.progress((i+1)/len(lines))
         st.success("完成")
         st.download_button("下载Word", create_word_report(res), "report.docx")
-
-# --- Tab 3: RAG ---
+    
+    # --- Tab 3: RAG ---
 with tab3:
     st.subheader("📚 知识库 (RAG)")
     st.caption("上传PDF/文档以增强模型回答的准确性。文件将同步到云端。")
@@ -1399,142 +1627,142 @@ with tab3:
                 st.rerun()
         
         github_files = st.session_state.github_rag_files
-        if not github_files:
-            # 首次加载时尝试获取
-            github_files = GithubSync.list_rag_files()
-            st.session_state.github_rag_files = github_files
+    if not github_files:
+        # 首次加载时尝试获取
+        github_files = GithubSync.list_rag_files()
+        st.session_state.github_rag_files = github_files
+    
+    if github_files:
+        st.info(f"共 {len(github_files)} 个文件")
         
-        if github_files:
-            st.info(f"共 {len(github_files)} 个文件")
-            
-            # 用于追踪需要删除的文件
-            if 'rag_files_to_delete' not in st.session_state:
-                st.session_state.rag_files_to_delete = set()
-            
-            # 显示文件列表，每个文件带删除按钮
-            for fname in github_files:
-                file_col, del_col = st.columns([5, 1])
-                with file_col:
-                    if fname in st.session_state.rag_files_to_delete:
-                        st.markdown(f"~~📄 {fname}~~ *(待删除)*")
-                    else:
-                        st.markdown(f"📄 {fname}")
-                with del_col:
-                    if fname not in st.session_state.rag_files_to_delete:
-                        if st.button("🗑️", key=f"del_rag_{fname}", help=f"删除 {fname}"):
-                            st.session_state.rag_files_to_delete.add(fname)
-                            st.rerun()
-                    else:
-                        if st.button("↩️", key=f"undo_rag_{fname}", help="撤销删除"):
-                            st.session_state.rag_files_to_delete.discard(fname)
-                            st.rerun()
-            
-            # 如果有待删除的文件，显示确认按钮
-            if st.session_state.rag_files_to_delete:
-                st.warning(f"⚠️ 将删除 {len(st.session_state.rag_files_to_delete)} 个文件")
-                del_col1, del_col2 = st.columns(2)
-                with del_col1:
-                    if st.button("✅ 确认删除", type="primary", key="confirm_del_rag"):
-                        with st.spinner("正在删除文件..."):
-                            deleted = []
-                            for fname in st.session_state.rag_files_to_delete:
-                                if GithubSync.delete_rag_file(fname):
-                                    deleted.append(fname)
-                            
-                            # 更新session state
-                            st.session_state.github_rag_files = [f for f in github_files if f not in deleted]
-                            
-                            # 更新本地知识库文件列表
-                            current_kb_files = st.session_state.get('kb_files', [])
-                            st.session_state.kb_files = [f for f in current_kb_files if f not in deleted]
-                            ResourceManager.save_kb_files(st.session_state.kb_files)
-                            
-                            st.session_state.rag_files_to_delete = set()
-                            st.success(f"✅ 已删除 {len(deleted)} 个文件")
-                            
-                            # 提示需要重建知识库
-                            st.info("💡 文件已从云端删除。如需更新本地知识库，请点击下方的'重建本地知识库'按钮。")
-                            time.sleep(1)
-                            st.rerun()
-                with del_col2:
-                    if st.button("❌ 取消", key="cancel_del_rag"):
-                        st.session_state.rag_files_to_delete = set()
-                        st.rerun()
-        else:
-            st.caption("暂无RAG文件")
+        # 用于追踪需要删除的文件
+        if 'rag_files_to_delete' not in st.session_state:
+            st.session_state.rag_files_to_delete = set()
         
-        st.markdown("---")
-        
-        # ===== 上传新文件（添加模式） =====
-        st.markdown("**➕ 添加新文件：**")
-        up = st.file_uploader("选择文件", accept_multiple_files=True, key="kb_uploader", 
-                            type=['pdf', 'txt', 'docx'])
-        
-        if up and st.button("📤 添加到知识库", type="primary"):
-            # 检查是否有重名文件
-            new_names = [u.name for u in up]
-            existing_names = st.session_state.get('github_rag_files', [])
-            duplicate_names = set(new_names) & set(existing_names)
-            
-            if duplicate_names:
-                st.warning(f"⚠️ 以下文件已存在，将被覆盖：{', '.join(duplicate_names)}")
-            
-            with st.spinner("正在处理文件..."):
-                # 1. 解析文件内容
-                raw = "".join([parse_file(u) for u in up])
-                
-                if not raw.strip():
-                    st.error("❌ 无法从上传的文件中提取有效文本")
+        # 显示文件列表，每个文件带删除按钮
+        for fname in github_files:
+            file_col, del_col = st.columns([5, 1])
+            with file_col:
+                if fname in st.session_state.rag_files_to_delete:
+                    st.markdown(f"~~📄 {fname}~~ *(待删除)*")
                 else:
-                    # 2. 上传到GitHub
-                    with st.spinner("上传到GitHub..."):
-                        success, uploaded_names = GithubSync.add_rag_files(up, "tea_data/RAG")
-                    
-                    if success:
-                        # 3. 更新本地文件列表
-                        current_kb_files = st.session_state.get('kb_files', [])
-                        # 合并文件列表（去重）
-                        all_files = list(set(current_kb_files + uploaded_names))
-                        st.session_state.kb_files = all_files
-                        st.session_state.github_rag_files = list(set(existing_names + uploaded_names))
-                        ResourceManager.save_kb_files(all_files)
+                    st.markdown(f"📄 {fname}")
+            with del_col:
+                if fname not in st.session_state.rag_files_to_delete:
+                    if st.button("🗑️", key=f"del_rag_{fname}", help=f"删除 {fname}"):
+                        st.session_state.rag_files_to_delete.add(fname)
+                        st.rerun()
+                else:
+                    if st.button("↩️", key=f"undo_rag_{fname}", help="撤销删除"):
+                        st.session_state.rag_files_to_delete.discard(fname)
+                        st.rerun()
+        
+        # 如果有待删除的文件，显示确认按钮
+        if st.session_state.rag_files_to_delete:
+            st.warning(f"⚠️ 将删除 {len(st.session_state.rag_files_to_delete)} 个文件")
+            del_col1, del_col2 = st.columns(2)
+            with del_col1:
+                if st.button("✅ 确认删除", type="primary", key="confirm_del_rag"):
+                    with st.spinner("正在删除文件..."):
+                        deleted = []
+                        for fname in st.session_state.rag_files_to_delete:
+                            if GithubSync.delete_rag_file(fname):
+                                deleted.append(fname)
                         
-                        st.success(f"✅ 已上传 {len(uploaded_names)} 个文件到GitHub")
-                        st.info("💡 请点击下方的'重建本地知识库'按钮以更新向量索引。")
+                        # 更新session state
+                        st.session_state.github_rag_files = [f for f in github_files if f not in deleted]
+                        
+                        # 更新本地知识库文件列表
+                        current_kb_files = st.session_state.get('kb_files', [])
+                        st.session_state.kb_files = [f for f in current_kb_files if f not in deleted]
+                        ResourceManager.save_kb_files(st.session_state.kb_files)
+                        
+                        st.session_state.rag_files_to_delete = set()
+                        st.success(f"✅ 已删除 {len(deleted)} 个文件")
+                        
+                        # 提示需要重建知识库
+                        st.info("💡 文件已从云端删除。如需更新本地知识库，请点击下方的'重建本地知识库'按钮。")
                         time.sleep(1)
                         st.rerun()
-                    else:
-                        st.error("❌ 上传到GitHub失败")
+            with del_col2:
+                if st.button("❌ 取消", key="cancel_del_rag"):
+                    st.session_state.rag_files_to_delete = set()
+                    st.rerun()
+    else:
+        st.caption("暂无RAG文件")
     
-    # ===== 重建本地知识库按钮 =====
-    with colu2:
-        st.markdown("**🔧 知识库维护：**")
-        local_kb_count = len(st.session_state.kb[1])
-        st.caption(f"网页端知识库：{local_kb_count} 个片段")
+    st.markdown("---")
+    
+    # ===== 上传新文件（添加模式） =====
+    st.markdown("**➕ 添加新文件：**")
+    up = st.file_uploader("选择文件", accept_multiple_files=True, key="kb_uploader", 
+                        type=['pdf', 'txt', 'docx'])
+    
+    if up and st.button("📤 添加到知识库", type="primary"):
+        # 检查是否有重名文件
+        new_names = [u.name for u in up]
+        existing_names = st.session_state.get('github_rag_files', [])
+        duplicate_names = set(new_names) & set(existing_names)
         
-        # 每个文件换行显示
-        if kb_files:
-            st.markdown("**网页端知识库文件:**")
-            for fname in kb_files:
-                st.markdown(f"- 📄 {fname}")
-        else:
-            st.markdown("**网页端知识库文件:** 无") 
-        st.markdown("---")
-        st.markdown("云端数据与网页数据不统一？")
-        if st.button("🔄 从云端加载知识库", use_container_width=True, type="primary"):
-            with st.spinner("正在从云端拉取并重建知识库..."):
-                success, msg = load_rag_from_github(aliyun_key)
+        if duplicate_names:
+            st.warning(f"⚠️ 以下文件已存在，将被覆盖：{', '.join(duplicate_names)}")
+        
+        with st.spinner("正在处理文件..."):
+            # 1. 解析文件内容
+            raw = "".join([parse_file(u) for u in up])
+            
+            if not raw.strip():
+                st.error("❌ 无法从上传的文件中提取有效文本")
+            else:
+                # 2. 上传到GitHub
+                with st.spinner("上传到GitHub..."):
+                    success, uploaded_names = GithubSync.add_rag_files(up, "tea_data/RAG")
+                
                 if success:
-                    st.success(msg)
-                    # 更新GitHub文件列表
-                    st.session_state.github_rag_files = GithubSync.list_rag_files()
+                    # 3. 更新本地文件列表
+                    current_kb_files = st.session_state.get('kb_files', [])
+                    # 合并文件列表（去重）
+                    all_files = list(set(current_kb_files + uploaded_names))
+                    st.session_state.kb_files = all_files
+                    st.session_state.github_rag_files = list(set(existing_names + uploaded_names))
+                    ResourceManager.save_kb_files(all_files)
+                    
+                    st.success(f"✅ 已上传 {len(uploaded_names)} 个文件到GitHub")
+                    st.info("💡 请点击下方的'重建本地知识库'按钮以更新向量索引。")
+                    time.sleep(1)
+                    st.rerun()
                 else:
-                    st.error(msg)
-            time.sleep(1)
-            st.rerun()
+                    st.error("❌ 上传到GitHub失败")
 
+# ===== 重建本地知识库按钮 =====
+with colu2:
+    st.markdown("**🔧 知识库维护：**")
+    local_kb_count = len(st.session_state.kb[1])
+    st.caption(f"网页端知识库：{local_kb_count} 个片段")
     
-    
+    # 每个文件换行显示
+    if kb_files:
+        st.markdown("**网页端知识库文件:**")
+        for fname in kb_files:
+            st.markdown(f"- 📄 {fname}")
+    else:
+        st.markdown("**网页端知识库文件:** 无") 
+    st.markdown("---")
+    st.markdown("云端数据与网页数据不统一？")
+    if st.button("🔄 从云端加载知识库", use_container_width=True, type="primary"):
+        with st.spinner("正在从云端拉取并重建知识库..."):
+            success, msg = load_rag_from_github(aliyun_key)
+            if success:
+                st.success(msg)
+                # 更新GitHub文件列表
+                st.session_state.github_rag_files = GithubSync.list_rag_files()
+            else:
+                st.error(msg)
+        time.sleep(1)
+        st.rerun()
+
+
+
 with tab4:
     MANAGER_URL = "http://117.50.183.138:8001"
     c1, c2 = st.columns([5, 5])
@@ -1566,7 +1794,8 @@ with tab4:
                 if st.form_submit_button("保存判例并同步"):
                     new_c = {"text": f_txt, "tags": f_tag, "scores": input_scores, "created_at": time.strftime("%Y-%m-%d")}
                     st.session_state.cases[1].append(new_c)
-                    vec = embedder.encode([f_txt])
+                    vec = embedder.encode([f_txt]).astype("float32")
+                    faiss.normalize_L2(vec)
                     st.session_state.cases[0].add(vec)
                     ResourceManager.save(st.session_state.cases[0], st.session_state.cases[1], PATHS.case_index, PATHS.case_data, is_json=True)
                     
@@ -1576,7 +1805,7 @@ with tab4:
                     
                     st.success("已保存并同步！")
                     time.sleep(1); st.rerun()
-
+    
     # --- 右侧：微调控制 ---
 with c2:
     st.subheader("🚀 模型微调 (LoRA)")
