@@ -1002,7 +1002,7 @@ def parse_file_bytes(filename: str, content: bytes) -> str:
         print(f"[ERROR]    ✗ 解析 {filename} 失败: {e}")
         import traceback
         traceback.print_exc()
-        return ""
+    return ""
 
 def create_word_report(results: List[Dict]) -> BytesIO:
     """生成Word报告"""
@@ -2122,6 +2122,7 @@ with tab6:
                     if st.session_state.get(f"judge_out_{l.get('id','')}"):
                         st.markdown("**裁判分析**")
                         st.write(st.session_state.get(f"judge_out_{l.get('id','')}"))
+
 
 
 
