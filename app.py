@@ -609,7 +609,7 @@ class EvaluationLogger:
         """
         try:
             resp = llm_client.chat.completions.create(
-                model="deepseek-chat",
+                model="qwen2.5-72b-instruct",
                 messages=[{"role": "user", "content": judge_prompt}]
             )
             analysis = resp.choices[0].message.content
@@ -832,7 +832,7 @@ def llm_normalize_user_input(raw_query: str, client: OpenAI) -> str:
     )
 
     resp = client.chat.completions.create(
-        model="deepseek-chat",
+        model="qwen2.5-72b-instruct",
         temperature=0,
         messages=[
             {"role": "system", "content": system_prompt},
@@ -858,7 +858,7 @@ def run_scoring(text: str, kb_res: Tuple, case_res: Tuple, prompt_cfg: Dict, emb
         hop=1,
         max_expand=12
     )
-    
+
     # --- CASES ---
     case_txt, found_cases = "", []
     if case_res[0].ntotal > 0:
@@ -867,7 +867,7 @@ def run_scoring(text: str, kb_res: Tuple, case_res: Tuple, prompt_cfg: Dict, emb
             if 0 <= i < len(case_res[1]):
                 c = case_res[1][i]
                 found_cases.append(c)
-    
+
                 score_details = []
                 for factor, info in c.get("scores", {}).items():
                     if isinstance(info, dict):
@@ -875,20 +875,20 @@ def run_scoring(text: str, kb_res: Tuple, case_res: Tuple, prompt_cfg: Dict, emb
                             f"{factor}: {info.get('score')}分 (理由: {info.get('comment', '无')})"
                         )
                 scores_str = " | ".join(score_details)
-    
+
                 case_txt += (
                     f"\n---\n"
                     f"【相似判例】: {c.get('text','')}\n"
                     f"【该判例专家分】{scores_str}\n"
                     f"【硬约束】如果待评分文本与该判例高度一致（语义基本相同），六因子分数应优先对齐该判例的专家分；只有明确出现相反描述时才允许偏离，并必须在comment里解释偏离原因。\n"
                 )
-        
+
     if not found_cases:
         case_txt = "（无相似判例）"
-    
+
     sys_p = prompt_cfg.get('system_template', "")
     user_p = prompt_cfg.get('user_template', "").format(product_desc=text, context_text=ctx_txt, case_text=case_txt)
-    
+
     try:
         resp = client.chat.completions.create(
             model=model_id,
@@ -1002,7 +1002,7 @@ def parse_file_bytes(filename: str, content: bytes) -> str:
         print(f"[ERROR]    ✗ 解析 {filename} 失败: {e}")
         import traceback
         traceback.print_exc()
-    return ""
+        return ""
 
 def create_word_report(results: List[Dict]) -> BytesIO:
     """生成Word报告"""
@@ -1201,8 +1201,6 @@ def load_rag_from_github(aliyun_key: str) -> Tuple[bool, str]:
         st.session_state.kb_files = file_names
         
         # Build GraphRAG-style community summaries for static KB chunks (non-case)
-        ensure_kb_graphrag(temp_embedder, force_rebuild=True)
-        
         ResourceManager.save(kb_idx, chunks, PATHS.kb_index, PATHS.kb_chunks)
         ResourceManager.save_kb_files(file_names)
         
@@ -1475,7 +1473,6 @@ with st.sidebar:
     # ✅ Ensure FAISS indices use cosine similarity (IP + normalized vectors)
     ensure_case_index_cosine(embedder)
     ensure_kb_index_cosine(embedder)
-    ensure_kb_graphrag(embedder)
     st.markdown("---")
     
     # ===== 延迟加载 RAG 逻辑 =====
@@ -2122,10 +2119,3 @@ with tab6:
                     if st.session_state.get(f"judge_out_{l.get('id','')}"):
                         st.markdown("**裁判分析**")
                         st.write(st.session_state.get(f"judge_out_{l.get('id','')}"))
-
-
-
-
-
-
-
