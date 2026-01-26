@@ -859,47 +859,47 @@ ctx_txt, hits = graphrag_static_kb_context(
     max_expand=12
 )
 
-    # --- CASES ---
-    case_txt, found_cases = "", []
-    if case_res[0].ntotal > 0:
-        _, idx = case_res[0].search(vec, c_num)
-        for i in idx[0]:
-            if 0 <= i < len(case_res[1]):
-                c = case_res[1][i]
-                found_cases.append(c)
+# --- CASES ---
+case_txt, found_cases = "", []
+if case_res[0].ntotal > 0:
+    _, idx = case_res[0].search(vec, c_num)
+    for i in idx[0]:
+        if 0 <= i < len(case_res[1]):
+            c = case_res[1][i]
+            found_cases.append(c)
 
-                score_details = []
-                for factor, info in c.get("scores", {}).items():
-                    if isinstance(info, dict):
-                        score_details.append(
-                            f"{factor}: {info.get('score')}分 (理由: {info.get('comment', '无')})"
-                        )
-                scores_str = " | ".join(score_details)
+            score_details = []
+            for factor, info in c.get("scores", {}).items():
+                if isinstance(info, dict):
+                    score_details.append(
+                        f"{factor}: {info.get('score')}分 (理由: {info.get('comment', '无')})"
+                    )
+            scores_str = " | ".join(score_details)
 
-                case_txt += (
-                    f"\n---\n"
-                    f"【相似判例】: {c.get('text','')}\n"
-                    f"【该判例专家分】{scores_str}\n"
-                    f"【硬约束】如果待评分文本与该判例高度一致（语义基本相同），六因子分数应优先对齐该判例的专家分；只有明确出现相反描述时才允许偏离，并必须在comment里解释偏离原因。\n"
-                )
+            case_txt += (
+                f"\n---\n"
+                f"【相似判例】: {c.get('text','')}\n"
+                f"【该判例专家分】{scores_str}\n"
+                f"【硬约束】如果待评分文本与该判例高度一致（语义基本相同），六因子分数应优先对齐该判例的专家分；只有明确出现相反描述时才允许偏离，并必须在comment里解释偏离原因。\n"
+            )
 
-    if not found_cases:
-        case_txt = "（无相似判例）"
+if not found_cases:
+    case_txt = "（无相似判例）"
 
-    sys_p = prompt_cfg.get('system_template', "")
-    user_p = prompt_cfg.get('user_template', "").format(product_desc=text, context_text=ctx_txt, case_text=case_txt)
+sys_p = prompt_cfg.get('system_template', "")
+user_p = prompt_cfg.get('user_template', "").format(product_desc=text, context_text=ctx_txt, case_text=case_txt)
 
-    try:
-        resp = client.chat.completions.create(
-            model=model_id,
-            messages=[{"role":"system", "content":sys_p}, {"role":"user", "content":user_p}],
-            response_format={"type": "json_object"},
-            temperature=0.3
-        )
-        return json.loads(resp.choices[0].message.content), hits, found_cases
-    except Exception as e:
-        st.error(f"Inference Error: {e}")
-        return None, [], []
+try:
+    resp = client.chat.completions.create(
+        model=model_id,
+        messages=[{"role":"system", "content":sys_p}, {"role":"user", "content":user_p}],
+        response_format={"type": "json_object"},
+        temperature=0.3
+    )
+    return json.loads(resp.choices[0].message.content), hits, found_cases
+except Exception as e:
+    st.error(f"Inference Error: {e}")
+    return None, [], []
 
 # ==========================================
 # [SECTION 3] 辅助与可视化
@@ -2122,3 +2122,4 @@ with tab6:
                     if st.session_state.get(f"judge_out_{l.get('id','')}"):
                         st.markdown("**裁判分析**")
                         st.write(st.session_state.get(f"judge_out_{l.get('id','')}"))
+
