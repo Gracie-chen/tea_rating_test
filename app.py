@@ -1596,7 +1596,7 @@ with tab1:
         else:
             with st.spinner(f"正在使用 {model_id} 品鉴."):
                 user_input = llm_normalize_user_input(user_input, client_d)
-                scores, kb_h, case_h = run_scoring(user_input, st.session_state.kb, st.session_state.cases, st.session_state.prompt_config, embedder, client, "deepseek-r1", r_num, c_num)
+                scores, kb_h, case_h = run_scoring(user_input, st.session_state.kb, st.session_state.cases, st.session_state.prompt_config, embedder, client, "Qwen2.5-7B-Instruct", r_num, c_num)
                 st.session_state.current_user_input = user_input
     
                 scores, kb_h, case_h = run_scoring(
@@ -1711,7 +1711,7 @@ with tab2:
         res, bar = [], st.progress(0)
         for i, l in enumerate(lines):
             l = llm_normalize_user_input(l, client_d)
-            s, _, _ = run_scoring(l, st.session_state.kb, st.session_state.cases, st.session_state.prompt_config, embedder, client, "deepseek-r1", r_n, c_n)
+            s, _, _ = run_scoring(l, st.session_state.kb, st.session_state.cases, st.session_state.prompt_config, embedder, client, "Qwen2.5-7B-Instruct", r_n, c_n)
             res.append({"id":i+1, "text":l, "scores":s})
             bar.progress((i+1)/len(lines))
         st.success("完成")
@@ -2121,4 +2121,5 @@ with tab6:
                     if st.session_state.get(f"judge_out_{l.get('id','')}"):
                         st.markdown("**裁判分析**")
                         st.write(st.session_state.get(f"judge_out_{l.get('id','')}"))
+
 
