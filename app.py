@@ -18,6 +18,7 @@ from openai import OpenAI
 from docx import Document
 import matplotlib.pyplot as plt
 from scipy.interpolate import make_interp_spline
+from graphrag_retriever import GraphRAGRetriever
 import base64
 
 # ==========================================
@@ -699,122 +700,107 @@ def ensure_kb_index_cosine(embedder):
 
 
 
+
 # ==========================================
-# [SECTION 1.5] GraphRAG-like index for static KB chunks (non-case)
+# [SECTION 1.5] External GraphRAG static KB retrieval (via graphrag_retriever.py)
 # ==========================================
 
-def _build_kb_graphrag_from_chunks(chunks: List[str], embedder: 'AliyunEmbedder', max_clusters: int = 20) -> Tuple[faiss.IndexFlatIP, List[str], Dict[int, List[int]]]:
-    """
-    Build a lightweight GraphRAG-style community summary index **ONLY** from static KB chunks.
-    - Communities are approximated via FAISS KMeans clustering over chunk embeddings.
-    - Each community is represented by a "community summary" built from representative chunks.
-    This is intentionally local/offline-ish and does NOT touch the case library.
-    Returns: (summary_faiss_index, community_summaries, community_to_chunk_ids)
-    """
-    if not chunks:
-        return faiss.IndexFlatIP(1024), [], {}
+def _get_graphrag_artifact_dir() -> str:
+    """Resolve GraphRAG artifact directory (env overrides local default)."""
+    env_dir = os.getenv("GRAPHRAG_ARTIFACT_DIR", "").strip()
+    if env_dir:
+        return env_dir
+    return str(PATHS.GRAPHRAG_DIR)
 
-    # 1) Embed chunks (batch) and normalize for cosine (IP)
-    batch_size = 16
-    vec_list = []
-    for i in range(0, len(chunks), batch_size):
-        vecs = embedder.encode(chunks[i:i+batch_size])
-        vec_list.append(vecs)
-    vecs = np.vstack(vec_list).astype('float32')
-    faiss.normalize_L2(vecs)
+def _get_graphrag_retriever() -> 'GraphRAGRetriever | None':
+    """Lazily load GraphRAGRetriever and cache in session_state."""
+    if st.session_state.get("_gr_retriever_loaded", False):
+        return st.session_state.get("_gr_retriever_obj", None)
 
-    d = vecs.shape[1]
-    n = vecs.shape[0]
-    # Heuristic cluster count (small n -> small k)
-    k = int(max(2, min(max_clusters, round(np.sqrt(n)))))
-    if k >= n:
-        k = max(1, n // 2)
-    if k <= 1:
-        # Single community fallback
-        summaries = ["\n".join([f"- {c[:220].strip()}..." for c in chunks[: min(12, len(chunks))]])]
-        svec = embedder.encode(summaries).astype('float32')
-        faiss.normalize_L2(svec)
-        sidx = faiss.IndexFlatIP(svec.shape[1])
-        sidx.add(svec)
-        return sidx, summaries, {0: list(range(len(chunks)))}
-
-    # 2) KMeans to approximate "communities"
-    km = faiss.Kmeans(d, k, niter=25, verbose=False, spherical=True)
-    km.train(vecs)
-
-    # Assign each chunk to nearest centroid
-    _, assign = km.index.search(vecs, 1)  # (n,1)
-    assign = assign.reshape(-1)
-
-    community_to_ids: Dict[int, List[int]] = {cid: [] for cid in range(k)}
-    for i, cid in enumerate(assign.tolist()):
-        community_to_ids[int(cid)].append(i)
-
-    # 3) Build community "summaries" from representative chunks (closest to centroid)
-    centroids = km.centroids  # (k,d)
-    # Ensure centroids are normalized if spherical
-    centroids = centroids.astype('float32')
-    faiss.normalize_L2(centroids)
-
-    summaries: List[str] = []
-    for cid in range(k):
-        ids = community_to_ids.get(cid, [])
-        if not ids:
-            summaries.append("(empty community)")
-            continue
-
-        # Compute similarity to centroid for all members; pick top representatives
-        member_vecs = vecs[ids]
-        sims = member_vecs @ centroids[cid].reshape(-1, 1)
-        # sort descending by similarity
-        top_local = np.argsort(-sims.reshape(-1))[: min(8, len(ids))]
-        top_ids = [ids[j] for j in top_local.tolist()]
-
-        # Create a compact "report" style context
-        rep_lines = []
-        for tid in top_ids:
-            t = chunks[tid].strip().replace("\n", " ")
-            rep_lines.append(f"- {t[:240]}...")
-        summary = f"【KB Community {cid+1}/{k}】\n" + "\n".join(rep_lines)
-        summaries.append(summary)
-
-    # 4) Embed summaries and build FAISS index for retrieval at query time
-    svec_list = []
-    for i in range(0, len(summaries), batch_size):
-        svec_list.append(embedder.encode(summaries[i:i+batch_size]))
-    svec = np.vstack(svec_list).astype('float32')
-    faiss.normalize_L2(svec)
-
-    sidx = faiss.IndexFlatIP(svec.shape[1])
-    sidx.add(svec)
-    return sidx, summaries, community_to_ids
-
-
-def ensure_kb_graphrag(embedder: 'AliyunEmbedder', force_rebuild: bool = False) -> None:
-    """
-    Ensure a GraphRAG-style index exists for the static KB chunks (non-case).
-    This guarantees that KB retrieval in scoring uses community summaries rather than raw chunks.
-    """
-    if (not force_rebuild) and st.session_state.get("kb_graphrag_ready", False):
-        return
-
-    kb_idx, kb_chunks = st.session_state.get("kb", (faiss.IndexFlatIP(1024), []))
-    if not kb_chunks:
-        st.session_state.kb_graphrag = (faiss.IndexFlatIP(1024), [], {})
-        st.session_state.kb_graphrag_ready = True
-        return
+    artifact_dir = _get_graphrag_artifact_dir()
+    edges_path = os.path.join(artifact_dir, "graph_edges.jsonl")
+    comm_path = os.path.join(artifact_dir, "communities.json")
+    if not (os.path.exists(edges_path) and os.path.exists(comm_path)):
+        st.session_state["_gr_retriever_loaded"] = True
+        st.session_state["_gr_retriever_obj"] = None
+        return None
 
     try:
-        sidx, summaries, c2ids = _build_kb_graphrag_from_chunks(kb_chunks, embedder)
-        st.session_state.kb_graphrag = (sidx, summaries, c2ids)
-        st.session_state.kb_graphrag_ready = True
-        print(f"[INFO]   ✓ GraphRAG(KB) built: {len(summaries)} communities from {len(kb_chunks)} chunks")
+        gr = GraphRAGRetriever(artifact_dir=artifact_dir)
+        st.session_state["_gr_retriever_loaded"] = True
+        st.session_state["_gr_retriever_obj"] = gr
+        return gr
     except Exception as e:
-        # Fail-safe: do not break app; fall back to classic vector-RAG on raw chunks
-        st.session_state.kb_graphrag = (faiss.IndexFlatIP(1024), [], {})
-        st.session_state.kb_graphrag_ready = True
-        print(f"[WARN]   ⚠️ GraphRAG(KB) build failed, fallback to raw-chunk retrieval. err={e}")
+        print(f"[WARN] GraphRAGRetriever init failed: {e}")
+        st.session_state["_gr_retriever_loaded"] = True
+        st.session_state["_gr_retriever_obj"] = None
+        return None
 
+def graphrag_static_kb_context(query_vec: np.ndarray,
+                              kb_index: faiss.Index,
+                              kb_chunks: List[str],
+                              k_num: int = 3,
+                              top_seed: int = 5,
+                              hop: int = 1,
+                              max_expand: int = 12) -> Tuple[str, List[str]]:
+    """Build KB context using (vector seeds) + GraphRAG expansion over a static KB graph."""
+    if kb_index is None or getattr(kb_index, "ntotal", 0) <= 0 or not kb_chunks:
+        return "（无手册资料）", []
+
+    # Vector seeds
+    D, I = kb_index.search(query_vec, max(k_num, top_seed))
+    vector_hits: List[Tuple[str, float]] = []
+    for score, idx in zip(D[0].tolist(), I[0].tolist()):
+        if idx is None or idx < 0 or idx >= len(kb_chunks):
+            continue
+        vector_hits.append((str(idx), float(score)))
+
+    # Map for retriever
+    chunk_text_map = {str(i): kb_chunks[i] for i in range(len(kb_chunks))}
+
+    gr = _get_graphrag_retriever()
+    if gr is None:
+        # Fallback: classic vector context
+        hits = [kb_chunks[int(cid)] for cid, _ in vector_hits[:k_num]]
+        ctx = "\n".join([f"- {h[:240].strip()}..." for h in hits]) if hits else "（无手册资料）"
+        return ctx, hits
+
+    try:
+        expanded = gr.expand(
+            vector_hits=vector_hits,
+            chunk_text_map=chunk_text_map,
+            top_seed=top_seed,
+            hop=hop,
+            max_expand=max_expand,
+            w_vec=0.7,
+            w_graph=0.3
+        )
+        seeds = expanded.get("seeds", [])
+        exp_chunks = expanded.get("expanded", [])
+        comm = expanded.get("community_summaries", [])
+
+        # Compose: community summaries first (global), then seeds, then expanded
+        parts = []
+        if comm:
+            parts.append("【GraphRAG 社区摘要】\n" + "\n\n".join(comm[:2]))
+        if seeds:
+            parts.append("【向量检索种子片段】\n" + "\n".join([f"- {s[:240].strip()}..." for s in seeds[:k_num]]))
+        if exp_chunks:
+            parts.append("【Graph 扩展片段】\n" + "\n".join([f"- {c[:240].strip()}..." for c in exp_chunks[:k_num]]))
+        ctx = "\n\n".join(parts) if parts else "（无手册资料）"
+
+        hits_texts = []
+        for t in (seeds + exp_chunks):
+            if t and t not in hits_texts:
+                hits_texts.append(t)
+            if len(hits_texts) >= k_num:
+                break
+        return ctx, hits_texts
+    except Exception as e:
+        print(f"[WARN] GraphRAG expand failed, fallback to vector-only. err={e}")
+        hits = [kb_chunks[int(cid)] for cid, _ in vector_hits[:k_num]]
+        ctx = "\n".join([f"- {h[:240].strip()}..." for h in hits]) if hits else "（无手册资料）"
+        return ctx, hits
 
 def llm_normalize_user_input(raw_query: str, client: OpenAI) -> str:
     """使用 LLM 对用户输入做语义规范化 / 去噪"""
@@ -857,27 +843,21 @@ def llm_normalize_user_input(raw_query: str, client: OpenAI) -> str:
 
 def run_scoring(text: str, kb_res: Tuple, case_res: Tuple, prompt_cfg: Dict, embedder: AliyunEmbedder, client: OpenAI, model_id: str, k_num: int, c_num: int):
     """执行 RAG 检索与 LLM 评分"""
-    vec = embedder.encode([text], text_type='query').astype('float32')
-    faiss.normalize_L2(vec)
-    # Debug：norm 应该约等于 1.0；如果不是，embedding 或 normalize 有问题
-    print(f"[DEBUG] query_vec_norm={float(np.linalg.norm(vec[0])):.6f}")
-    # --- KB (GraphRAG over static KB chunks; exclude cases) ---
-    ctx_txt, hits = "（无手册资料）", []
+vec = embedder.encode([text], text_type='query').astype("float32")
+faiss.normalize_L2(vec)
+# Debug：norm 应该约等于 1.0；如果不是，embedding 或 normalize 有问题
+print(f"[DEBUG] query_vec_norm={float(np.linalg.norm(vec[0])):.6f}")
 
-    # Prefer GraphRAG-style community summaries built ONLY from static KB chunks
-    kb_gr = st.session_state.get("kb_graphrag", None)
-    if kb_gr and isinstance(kb_gr, tuple) and len(kb_gr) >= 2 and getattr(kb_gr[0], "ntotal", 0) > 0:
-        _, sidx = kb_gr[0].search(vec, k_num)
-        hits = [kb_gr[1][i] for i in sidx[0] if 0 <= i < len(kb_gr[1])]
-        ctx_txt = "\n".join(hits) if hits else "（无手册资料）"
-    else:
-        # Fallback: classic vector-RAG on raw KB chunks
-        if kb_res[0].ntotal > 0:
-            _, idx = kb_res[0].search(vec, k_num)
-            hits = [kb_res[1][i] for i in idx[0] if i < len(kb_res[1])]
-            ctx_txt = "\n".join([f"- {h[:200]}..." for h in hits])
-
-
+# --- KB (External GraphRAG over static KB; exclude cases) ---
+ctx_txt, hits = graphrag_static_kb_context(
+    query_vec=vec,
+    kb_index=kb_res[0],
+    kb_chunks=kb_res[1],
+    k_num=k_num,
+    top_seed=max(5, k_num),
+    hop=1,
+    max_expand=12
+)
 
     # --- CASES ---
     case_txt, found_cases = "", []
@@ -2062,3 +2042,83 @@ with tab5:
                 st.session_state.prompt_config = new_cfg
                 with open(PATHS.prompt_config_file, 'w', encoding='utf-8') as f:
                     json.dump(new_cfg, f, ensure_ascii=False, indent=2)
+
+
+# --- Tab 6: 测试日志（误差分析 / MSE） ---
+with tab6:
+    st.subheader("🧪 测试日志（模型 vs 专家）")
+    st.caption("这里展示已归档的评测日志，并计算各因子的均方误差（MSE）。")
+
+    logs = EvaluationLogger.load_logs()
+    if not logs:
+        st.info("暂无日志。请先在「交互评分」里保存一次校准评分。")
+    else:
+        factors = ["优雅性", "辨识度", "协调性", "饱和度", "持久性", "苦涩度"]
+
+        def _extract_scores(pkg: dict) -> dict:
+            # pkg can be full model output or expert package
+            if not isinstance(pkg, dict):
+                return {}
+            s = pkg.get("scores", pkg.get("scores", {}))
+            # sometimes nested: {"scores": {...}}
+            if isinstance(s, dict) and "scores" in s and isinstance(s["scores"], dict):
+                s = s["scores"]
+            return s if isinstance(s, dict) else {}
+
+        def _mse(pred: dict, gt: dict) -> float:
+            se = []
+            for f in factors:
+                try:
+                    p = float(pred.get(f, {}).get("score", 0))
+                    g = float(gt.get(f, {}).get("score", 0))
+                    se.append((p - g) ** 2)
+                except Exception:
+                    continue
+            return float(np.mean(se)) if se else float("nan")
+
+        # Summary metrics
+        mses = []
+        for l in logs:
+            p = _extract_scores(l.get("model_prediction", {}))
+            g = _extract_scores(l.get("expert_ground_truth", {}))
+            mses.append(_mse(p, g))
+        valid_mses = [x for x in mses if x == x]  # filter NaN
+        if valid_mses:
+            st.metric("平均 MSE（六因子）", f"{np.mean(valid_mses):.3f}")
+        else:
+            st.warning("日志中缺少可计算的分数结构，无法统计 MSE。")
+
+        # List logs
+        for i, l in enumerate(logs[:50]):
+            with st.expander(f"#{i+1} {l.get('timestamp','')} | id={l.get('id','')}"):
+                st.markdown("**输入文本**")
+                st.write(l.get("input_text", ""))
+
+                pred_pkg = l.get("model_prediction", {})
+                gt_pkg = l.get("expert_ground_truth", {})
+
+                pred_s = _extract_scores(pred_pkg)
+                gt_s = _extract_scores(gt_pkg)
+                mse_val = _mse(pred_s, gt_s)
+
+                c1, c2 = st.columns(2)
+                with c1:
+                    st.markdown("**模型输出**")
+                    st.json(pred_pkg)
+                with c2:
+                    st.markdown("**专家校准**")
+                    st.json(gt_pkg)
+
+                st.markdown(f"**MSE（本条）**：{mse_val:.3f}" if mse_val == mse_val else "**MSE（本条）**：不可计算")
+
+                # LLM-as-judge
+                colj1, colj2 = st.columns([2, 8])
+                with colj1:
+                    if st.button("🤖 让裁判分析", key=f"judge_{l.get('id','')}", use_container_width=True):
+                        with st.spinner("裁判分析中..."):
+                            analysis = EvaluationLogger.run_judge(l.get("id", ""), client_d)
+                        st.session_state[f"judge_out_{l.get('id','')}"] = analysis
+                with colj2:
+                    if st.session_state.get(f"judge_out_{l.get('id','')}"):
+                        st.markdown("**裁判分析**")
+                        st.write(st.session_state.get(f"judge_out_{l.get('id','')}"))
