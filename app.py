@@ -896,10 +896,10 @@ try:
         response_format={"type": "json_object"},
         temperature=0.3
     )
-    return json.loads(resp.choices[0].message.content), hits, found_cases
+return json.loads(resp.choices[0].message.content), hits, found_cases
 except Exception as e:
     st.error(f"Inference Error: {e}")
-    return None, [], []
+return None, [], []
 
 # ==========================================
 # [SECTION 3] 辅助与可视化
@@ -2122,6 +2122,7 @@ with tab6:
                     if st.session_state.get(f"judge_out_{l.get('id','')}"):
                         st.markdown("**裁判分析**")
                         st.write(st.session_state.get(f"judge_out_{l.get('id','')}"))
+
 
 
 
