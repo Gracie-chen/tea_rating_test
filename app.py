@@ -1630,50 +1630,50 @@ with c2:
     else:
         st.error("🔴 服务器状态异常，请检查日志")
 
-        st.markdown("#### 1. 数据准备")
+    st.markdown("#### 1. 数据准备")
+    
+    if PATHS.training_file.exists():
+        with open(PATHS.training_file, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+        data_count = len(lines)
+    else:
+        data_count = 0
         
-        if PATHS.training_file.exists():
-            with open(PATHS.training_file, "r", encoding="utf-8") as f:
-                lines = f.readlines()
-            data_count = len(lines)
+    st.info(f"当前微调数据：**{data_count} 条** | 判例库：**{len(st.session_state.cases[1])} 条**")
+    
+    # ===== 修改：覆盖逻辑 =====
+    if st.button("🔄 将当前所有判例转为微调数据（覆盖）"):
+        cnt = ResourceManager.overwrite_finetune(
+            st.session_state.cases[1],
+            st.session_state.prompt_config.get('system_template',''), 
+            st.session_state.prompt_config.get('user_template','')
+        )
+        st.success(f"已覆盖写入 {cnt} 条微调数据！")
+        time.sleep(1); st.rerun()
+
+    st.markdown("#### 2. 启动训练")
+    st.caption("点击下方按钮将把数据上传至 GPU 服务器并开始训练。训练期间服务将中断约 2-5 分钟。")
+
+    btn_disabled = (server_status != "idle") or (data_count == 0)
+    
+    if st.button("🔥 开始微调 (Start LoRA)", type="primary", disabled=btn_disabled):
+        if not PATHS.training_file.exists():
+            st.error("找不到训练数据文件！")
         else:
-            data_count = 0
-            
-        st.info(f"当前微调数据：**{data_count} 条** | 判例库：**{len(st.session_state.cases[1])} 条**")
-        
-        # ===== 修改：覆盖逻辑 =====
-        if st.button("🔄 将当前所有判例转为微调数据（覆盖）"):
-            cnt = ResourceManager.overwrite_finetune(
-                st.session_state.cases[1],
-                st.session_state.prompt_config.get('system_template',''), 
-                st.session_state.prompt_config.get('user_template','')
-            )
-            st.success(f"已覆盖写入 {cnt} 条微调数据！")
-            time.sleep(1); st.rerun()
-
-        st.markdown("#### 2. 启动训练")
-        st.caption("点击下方按钮将把数据上传至 GPU 服务器并开始训练。训练期间服务将中断约 2-5 分钟。")
-
-        btn_disabled = (server_status != "idle") or (data_count == 0)
-        
-        if st.button("🔥 开始微调 (Start LoRA)", type="primary", disabled=btn_disabled):
-            if not PATHS.training_file.exists():
-                st.error("找不到训练数据文件！")
-            else:
-                try:
-                    with open(PATHS.training_file, "rb") as f:
-                        with st.spinner("正在上传数据并启动训练任务..."):
-                            files = {'file': ('tea_feedback.jsonl', f, 'application/json')}
-                            r = requests.post(f"{MANAGER_URL}/upload_and_train", files=files, timeout=100)
-                            
-                        if r.status_code == 200:
-                            st.balloons()
-                            st.success(f"✅ 任务已提交！服务器响应: {r.json().get('message')}")
-                            st.info("💡 你可以稍后刷新页面查看状态，训练完成后服务会自动恢复。")
-                        else:
-                            st.error(f"❌ 提交失败: {r.text}")
-                except Exception as e:
-                    st.error(f"❌ 连接错误: {e}")
+            try:
+                with open(PATHS.training_file, "rb") as f:
+                    with st.spinner("正在上传数据并启动训练任务..."):
+                        files = {'file': ('tea_feedback.jsonl', f, 'application/json')}
+                        r = requests.post(f"{MANAGER_URL}/upload_and_train", files=files, timeout=100)
+                        
+                    if r.status_code == 200:
+                        st.balloons()
+                        st.success(f"✅ 任务已提交！服务器响应: {r.json().get('message')}")
+                        st.info("💡 你可以稍后刷新页面查看状态，训练完成后服务会自动恢复。")
+                    else:
+                        st.error(f"❌ 提交失败: {r.text}")
+            except Exception as e:
+                st.error(f"❌ 连接错误: {e}")
 
 # --- Tab 4: Prompt配置 ---
 with tab5:
@@ -1701,6 +1701,7 @@ with tab5:
                 st.session_state.prompt_config = new_cfg
                 with open(PATHS.prompt_config_file, 'w', encoding='utf-8') as f:
                     json.dump(new_cfg, f, ensure_ascii=False, indent=2)
+
 
 
 
