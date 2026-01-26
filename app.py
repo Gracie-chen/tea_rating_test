@@ -609,7 +609,7 @@ class EvaluationLogger:
         """
         try:
             resp = llm_client.chat.completions.create(
-                model="qwen2.5-72b-instruct",
+                model="deepseek-chat",
                 messages=[{"role": "user", "content": judge_prompt}]
             )
             analysis = resp.choices[0].message.content
@@ -832,7 +832,7 @@ def llm_normalize_user_input(raw_query: str, client: OpenAI) -> str:
     )
 
     resp = client.chat.completions.create(
-        model="qwen2.5-72b-instruct",
+        model="deepseek-chat",
         temperature=0,
         messages=[
             {"role": "system", "content": system_prompt},
@@ -1442,58 +1442,57 @@ with st.sidebar:
         st.success("✅ API 就绪")
 
     st.markdown("---")
+    # 预处理模型（DeepSeek） + 评分模型（本地Qwen推理服务）
     st.markdown(f"**预处理模型：** `Deepseek-chat`")
-    model_id = "deepseek-r1"  # 默认使用基础模型
-    lora_enabled = False
-    
+    st.markdown(f"**评分模型：** `Qwen2.5-7B-Instruct`")
+
+    # 默认评分模型（可根据 LoRA 状态切换）
+    model_id = "Qwen2.5-7B-Instruct"
     try:
-        resp = requests.get("http://117.50.183.138:8001/status", timeout=2)
-        if resp.status_code == 200:
-            status_data = resp.json()
-            # ✅ 修复：检查 lora_gguf_available（实际能被挂载的格式）
-            if status_data.get("lora_gguf_available"):
-                lora_enabled = True
-                st.success("🎉 已启用微调模型 (LoRA-GGUF)")
-            elif status_data.get("lora_available"):
-                st.info("ℹ️ 检测到 LoRA 权重但未转换为 GGUF，使用基础模型")
-    except Exception as e:
-        st.caption(f"⚠️ 无法获取模型状态: {e}")
-    
-    st.markdown(f"**评分模型：** `{model_id}` {'(含LoRA)' if lora_enabled else '(基础版)'}")
+        resp = requests.get("http://117.50.89.74:8001/status", timeout=2)
+        if resp.status_code == 200 and resp.json().get("lora_available"):
+            model_id = "default_lora"
+            st.success("🎉 已启用微调模型")
+    except Exception:
+        pass
+
     ft_status = ResourceManager.load_ft_status()
     if ft_status and ft_status.get("status") == "succeeded":
         st.info(f"🎉 发现微调模型：`{ft_status.get('fine_tuned_model')}`")
 
+    # Embedding（阿里云 DashScope）
     embedder = AliyunEmbedder(aliyun_key)
-    client = OpenAI(api_key="dummy", base_url="http://117.50.183.138:8000/v1")
+
+    # 推理服务（本地 vLLM / OpenAI-compatible 网关）：用于 Qwen 评分
+    client = OpenAI(api_key="dummy", base_url="http://117.50.89.74:8000/v1")
+
+    # DeepSeek 官方接口：用于预处理清洗
     client_d = OpenAI(api_key=deepseek_key, base_url="https://api.deepseek.com")
-    
+
+    # 初始化判例库
     bootstrap_seed_cases(embedder)
-    
-    # ✅ Ensure FAISS indices use cosine similarity (IP + normalized vectors)
-    ensure_case_index_cosine(embedder)
-    ensure_kb_index_cosine(embedder)
+
     st.markdown("---")
-    
+
     # ===== 延迟加载 RAG 逻辑 =====
     kb_files = st.session_state.get('kb_files', [])
     kb_count = len(st.session_state.kb[1])
     case_count = len(st.session_state.cases[1])
-    
+
     # 检查是否需要从 GitHub 加载 RAG
     if st.session_state.get('rag_loading_needed', False):
         loading_status = st.session_state.get('rag_loading_status', 'pending')
-        
+
         if loading_status == 'pending':
             # 显示加载状态
             with st.status("🔄 正在从 GitHub 加载知识库...", expanded=True) as status:
                 st.write("📥 下载 RAG 文件...")
                 st.session_state.rag_loading_status = 'loading'
-                
+
                 try:
                     # 执行加载
                     success, msg = load_rag_from_github(aliyun_key)
-                    
+
                     if success:
                         status.update(label="✅ 知识库加载完成", state="complete", expanded=False)
                         st.session_state.rag_loading_status = 'complete'
@@ -1505,7 +1504,7 @@ with st.sidebar:
                         st.error(msg)
                         st.info("💡 您可以在 Tab3 手动上传 RAG 文件")
                         st.session_state.rag_loading_status = 'failed'
-                        
+
                         # 添加重试按钮
                         if st.button("🔄 重试加载", type="secondary"):
                             st.session_state.rag_loading_status = 'pending'
@@ -1514,33 +1513,33 @@ with st.sidebar:
                     status.update(label="❌ 加载出错", state="error", expanded=True)
                     st.error(f"加载失败: {str(e)}")
                     st.session_state.rag_loading_status = 'failed'
-                    
+
                     if st.button("🔄 重试加载", type="secondary"):
                         st.session_state.rag_loading_status = 'pending'
                         st.rerun()
-        
+
         elif loading_status == 'loading':
             st.info("🔄 正在加载知识库，请稍候...")
-        
+
         elif loading_status == 'failed':
             st.warning("⚠️ 知识库加载失败")
             if st.button("🔄 重试从 GitHub 加载", type="secondary"):
                 st.session_state.rag_loading_status = 'pending'
                 st.rerun()
-    
+
     # 更新显示的数据
     kb_count = len(st.session_state.kb[1])
     kb_files = st.session_state.get('kb_files', [])
-    
+
     st.markdown(f"知识库: **{kb_count}** 条 | 判例库: **{case_count}** 条")
     if kb_files:
         pass
     elif kb_count == 0:
         st.caption("⚠️ 知识库为空，请上传文件或从从云端加载")
-    
+
     st.caption("快速上传仅支持.zip文件格式。")
     st.caption("少量文件上传请至\"知识库设计\"板块。")
-    
+
     if st.button("📤 导出数据"):
         import zipfile, shutil
         temp_dir = Path("./temp_export"); temp_dir.mkdir(exist_ok=True)
@@ -1563,7 +1562,7 @@ with st.sidebar:
                 with zipfile.ZipFile(zp,'r') as z: z.extractall(PATHS.DATA_DIR)
                 st.success("导入成功，请刷新"); st.rerun()
 
-# C. 主界面
+
 st.markdown('<div class="main-title">🍵 茶品六因子 AI 评分器 Pro</div>', unsafe_allow_html=True)
 st.markdown('<div class="slogan">"一片叶子落入水中，改变了水的味道..."</div>', unsafe_allow_html=True)
 
