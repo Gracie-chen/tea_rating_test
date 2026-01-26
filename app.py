@@ -54,10 +54,12 @@ class PathConfig:
     # 运行时数据目录
     DATA_DIR = Path("./tea_data")
     RAG_DIR = Path("./tea_data/RAG")  # RAG文件存储目录
-    
+        
     def __init__(self):
         self.DATA_DIR.mkdir(exist_ok=True)
-        self.RAG_DIR.mkdir(exist_ok=True)  # 确保RAG目录存在
+        self.RAG_DIR.mkdir(exist_ok=True)
+    
+        self.GRAPHRAG_DIR = self.DATA_DIR / "graphrag_artifacts"
         self.GRAPHRAG_DIR.mkdir(exist_ok=True)
         # 向量库与持久化数据
         self.kb_index = self.DATA_DIR / "kb.index"
@@ -2119,3 +2121,4 @@ with tab6:
                     if st.session_state.get(f"judge_out_{l.get('id','')}"):
                         st.markdown("**裁判分析**")
                         st.write(st.session_state.get(f"judge_out_{l.get('id','')}"))
+
