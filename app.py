@@ -58,6 +58,7 @@ class PathConfig:
     def __init__(self):
         self.DATA_DIR.mkdir(exist_ok=True)
         self.RAG_DIR.mkdir(exist_ok=True)  # 确保RAG目录存在
+        self.GRAPHRAG_DIR.mkdir(exist_ok=True)
         # 向量库与持久化数据
         self.kb_index = self.DATA_DIR / "kb.index"
         self.kb_chunks = self.DATA_DIR / "kb_chunks.pkl"
@@ -710,7 +711,7 @@ def _get_graphrag_artifact_dir() -> str:
     env_dir = os.getenv("GRAPHRAG_ARTIFACT_DIR", "").strip()
     if env_dir:
         return env_dir
-    return str(PATHS.GRAPHRAG_DIR)
+    return str(getattr(PATHS, "GRAPHRAG_DIR", PATHS.DATA_DIR / "graphrag_artifacts"))
 
 def _get_graphrag_retriever() -> 'GraphRAGRetriever | None':
     """Lazily load GraphRAGRetriever and cache in session_state."""
