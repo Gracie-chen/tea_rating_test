@@ -898,7 +898,7 @@ try:
     )
     return json.loads(resp.choices[0].message.content), hits, found_cases
 except Exception as e:
-st.error(f"Inference Error: {e}")
+    st.error(f"Inference Error: {e}")
     return None, [], []
 
 # ==========================================
@@ -2122,5 +2122,6 @@ with tab6:
                     if st.session_state.get(f"judge_out_{l.get('id','')}"):
                         st.markdown("**裁判分析**")
                         st.write(st.session_state.get(f"judge_out_{l.get('id','')}"))
+
 
 
