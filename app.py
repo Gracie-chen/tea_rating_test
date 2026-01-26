@@ -6,7 +6,7 @@ import numpy as np
 import faiss
 import time
 import pickle
-from github import Github, GithubException, Auth  # 新增 Auth
+from github import Github, GithubException, Auth
 from pathlib import Path
 from io import BytesIO
 from typing import List, Dict, Any, Tuple, Optional
@@ -698,6 +698,124 @@ def ensure_kb_index_cosine(embedder):
         ResourceManager.save(new_idx, kb_chunks, PATHS.kb_index, PATHS.kb_chunks)
 
 
+
+# ==========================================
+# [SECTION 1.5] GraphRAG-like index for static KB chunks (non-case)
+# ==========================================
+
+def _build_kb_graphrag_from_chunks(chunks: List[str], embedder: 'AliyunEmbedder', max_clusters: int = 20) -> Tuple[faiss.IndexFlatIP, List[str], Dict[int, List[int]]]:
+    """
+    Build a lightweight GraphRAG-style community summary index **ONLY** from static KB chunks.
+    - Communities are approximated via FAISS KMeans clustering over chunk embeddings.
+    - Each community is represented by a "community summary" built from representative chunks.
+    This is intentionally local/offline-ish and does NOT touch the case library.
+    Returns: (summary_faiss_index, community_summaries, community_to_chunk_ids)
+    """
+    if not chunks:
+        return faiss.IndexFlatIP(1024), [], {}
+
+    # 1) Embed chunks (batch) and normalize for cosine (IP)
+    batch_size = 16
+    vec_list = []
+    for i in range(0, len(chunks), batch_size):
+        vecs = embedder.encode(chunks[i:i+batch_size])
+        vec_list.append(vecs)
+    vecs = np.vstack(vec_list).astype('float32')
+    faiss.normalize_L2(vecs)
+
+    d = vecs.shape[1]
+    n = vecs.shape[0]
+    # Heuristic cluster count (small n -> small k)
+    k = int(max(2, min(max_clusters, round(np.sqrt(n)))))
+    if k >= n:
+        k = max(1, n // 2)
+    if k <= 1:
+        # Single community fallback
+        summaries = ["\n".join([f"- {c[:220].strip()}..." for c in chunks[: min(12, len(chunks))]])]
+        svec = embedder.encode(summaries).astype('float32')
+        faiss.normalize_L2(svec)
+        sidx = faiss.IndexFlatIP(svec.shape[1])
+        sidx.add(svec)
+        return sidx, summaries, {0: list(range(len(chunks)))}
+
+    # 2) KMeans to approximate "communities"
+    km = faiss.Kmeans(d, k, niter=25, verbose=False, spherical=True)
+    km.train(vecs)
+
+    # Assign each chunk to nearest centroid
+    _, assign = km.index.search(vecs, 1)  # (n,1)
+    assign = assign.reshape(-1)
+
+    community_to_ids: Dict[int, List[int]] = {cid: [] for cid in range(k)}
+    for i, cid in enumerate(assign.tolist()):
+        community_to_ids[int(cid)].append(i)
+
+    # 3) Build community "summaries" from representative chunks (closest to centroid)
+    centroids = km.centroids  # (k,d)
+    # Ensure centroids are normalized if spherical
+    centroids = centroids.astype('float32')
+    faiss.normalize_L2(centroids)
+
+    summaries: List[str] = []
+    for cid in range(k):
+        ids = community_to_ids.get(cid, [])
+        if not ids:
+            summaries.append("(empty community)")
+            continue
+
+        # Compute similarity to centroid for all members; pick top representatives
+        member_vecs = vecs[ids]
+        sims = member_vecs @ centroids[cid].reshape(-1, 1)
+        # sort descending by similarity
+        top_local = np.argsort(-sims.reshape(-1))[: min(8, len(ids))]
+        top_ids = [ids[j] for j in top_local.tolist()]
+
+        # Create a compact "report" style context
+        rep_lines = []
+        for tid in top_ids:
+            t = chunks[tid].strip().replace("\n", " ")
+            rep_lines.append(f"- {t[:240]}...")
+        summary = f"【KB Community {cid+1}/{k}】\n" + "\n".join(rep_lines)
+        summaries.append(summary)
+
+    # 4) Embed summaries and build FAISS index for retrieval at query time
+    svec_list = []
+    for i in range(0, len(summaries), batch_size):
+        svec_list.append(embedder.encode(summaries[i:i+batch_size]))
+    svec = np.vstack(svec_list).astype('float32')
+    faiss.normalize_L2(svec)
+
+    sidx = faiss.IndexFlatIP(svec.shape[1])
+    sidx.add(svec)
+    return sidx, summaries, community_to_ids
+
+
+def ensure_kb_graphrag(embedder: 'AliyunEmbedder', force_rebuild: bool = False) -> None:
+    """
+    Ensure a GraphRAG-style index exists for the static KB chunks (non-case).
+    This guarantees that KB retrieval in scoring uses community summaries rather than raw chunks.
+    """
+    if (not force_rebuild) and st.session_state.get("kb_graphrag_ready", False):
+        return
+
+    kb_idx, kb_chunks = st.session_state.get("kb", (faiss.IndexFlatIP(1024), []))
+    if not kb_chunks:
+        st.session_state.kb_graphrag = (faiss.IndexFlatIP(1024), [], {})
+        st.session_state.kb_graphrag_ready = True
+        return
+
+    try:
+        sidx, summaries, c2ids = _build_kb_graphrag_from_chunks(kb_chunks, embedder)
+        st.session_state.kb_graphrag = (sidx, summaries, c2ids)
+        st.session_state.kb_graphrag_ready = True
+        print(f"[INFO]   ✓ GraphRAG(KB) built: {len(summaries)} communities from {len(kb_chunks)} chunks")
+    except Exception as e:
+        # Fail-safe: do not break app; fall back to classic vector-RAG on raw chunks
+        st.session_state.kb_graphrag = (faiss.IndexFlatIP(1024), [], {})
+        st.session_state.kb_graphrag_ready = True
+        print(f"[WARN]   ⚠️ GraphRAG(KB) build failed, fallback to raw-chunk retrieval. err={e}")
+
+
 def llm_normalize_user_input(raw_query: str, client: OpenAI) -> str:
     """使用 LLM 对用户输入做语义规范化 / 去噪"""
     system_prompt = (
@@ -743,13 +861,23 @@ def run_scoring(text: str, kb_res: Tuple, case_res: Tuple, prompt_cfg: Dict, emb
     faiss.normalize_L2(vec)
     # Debug：norm 应该约等于 1.0；如果不是，embedding 或 normalize 有问题
     print(f"[DEBUG] query_vec_norm={float(np.linalg.norm(vec[0])):.6f}")
-
-    # --- KB ---
+    # --- KB (GraphRAG over static KB chunks; exclude cases) ---
     ctx_txt, hits = "（无手册资料）", []
-    if kb_res[0].ntotal > 0:
-        _, idx = kb_res[0].search(vec, k_num)
-        hits = [kb_res[1][i] for i in idx[0] if i < len(kb_res[1])]
-        ctx_txt = "\n".join([f"- {h[:200]}..." for h in hits])
+
+    # Prefer GraphRAG-style community summaries built ONLY from static KB chunks
+    kb_gr = st.session_state.get("kb_graphrag", None)
+    if kb_gr and isinstance(kb_gr, tuple) and len(kb_gr) >= 2 and getattr(kb_gr[0], "ntotal", 0) > 0:
+        _, sidx = kb_gr[0].search(vec, k_num)
+        hits = [kb_gr[1][i] for i in sidx[0] if 0 <= i < len(kb_gr[1])]
+        ctx_txt = "\n".join(hits) if hits else "（无手册资料）"
+    else:
+        # Fallback: classic vector-RAG on raw KB chunks
+        if kb_res[0].ntotal > 0:
+            _, idx = kb_res[0].search(vec, k_num)
+            hits = [kb_res[1][i] for i in idx[0] if i < len(kb_res[1])]
+            ctx_txt = "\n".join([f"- {h[:200]}..." for h in hits])
+
+
 
     # --- CASES ---
     case_txt, found_cases = "", []
@@ -1092,6 +1220,9 @@ def load_rag_from_github(aliyun_key: str) -> Tuple[bool, str]:
         st.session_state.kb = (kb_idx, chunks)
         st.session_state.kb_files = file_names
         
+        # Build GraphRAG-style community summaries for static KB chunks (non-case)
+        ensure_kb_graphrag(temp_embedder, force_rebuild=True)
+        
         ResourceManager.save(kb_idx, chunks, PATHS.kb_index, PATHS.kb_chunks)
         ResourceManager.save_kb_files(file_names)
         
@@ -1364,6 +1495,7 @@ with st.sidebar:
     # ✅ Ensure FAISS indices use cosine similarity (IP + normalized vectors)
     ensure_case_index_cosine(embedder)
     ensure_kb_index_cosine(embedder)
+    ensure_kb_graphrag(embedder)
     st.markdown("---")
     
     # ===== 延迟加载 RAG 逻辑 =====
@@ -1930,4 +2062,3 @@ with tab5:
                 st.session_state.prompt_config = new_cfg
                 with open(PATHS.prompt_config_file, 'w', encoding='utf-8') as f:
                     json.dump(new_cfg, f, ensure_ascii=False, indent=2)
-
