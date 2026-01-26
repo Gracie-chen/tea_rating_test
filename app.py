@@ -1155,15 +1155,23 @@ with st.sidebar:
 
     st.markdown("---")
     st.markdown(f"**预处理模型：** `Deepseek-chat`")
-    st.markdown(f"**评分模型：** `deepseek-r1`")
-    model_id = "deepseek-r1"
+    model_id = "deepseek-r1"  # 默认使用基础模型
+    lora_enabled = False
+    
     try:
         resp = requests.get("http://117.50.183.138:8001/status", timeout=2)
-        if resp.status_code == 200 and resp.json().get("lora_available"):
-            model_id = "default_lora"
-            st.success("🎉 已启用微调模型")
-    except:
-        pass
+        if resp.status_code == 200:
+            status_data = resp.json()
+            # ✅ 修复：检查 lora_gguf_available（实际能被挂载的格式）
+            if status_data.get("lora_gguf_available"):
+                lora_enabled = True
+                st.success("🎉 已启用微调模型 (LoRA-GGUF)")
+            elif status_data.get("lora_available"):
+                st.info("ℹ️ 检测到 LoRA 权重但未转换为 GGUF，使用基础模型")
+    except Exception as e:
+        st.caption(f"⚠️ 无法获取模型状态: {e}")
+    
+    st.markdown(f"**评分模型：** `{model_id}` {'(含LoRA)' if lora_enabled else '(基础版)'}")
     ft_status = ResourceManager.load_ft_status()
     if ft_status and ft_status.get("status") == "succeeded":
         st.info(f"🎉 发现微调模型：`{ft_status.get('fine_tuned_model')}`")
@@ -1570,30 +1578,57 @@ with tab4:
                     time.sleep(1); st.rerun()
 
     # --- 右侧：微调控制 ---
-    with c2:
-        st.subheader("🚀 模型微调 (LoRA)")
-        
-        server_status = "unknown"
-        try:
-            resp = requests.get(f"{MANAGER_URL}/status", timeout=2)
-            if resp.status_code == 200:
-                status_data = resp.json()
-                if status_data.get("vllm_status") == "running":
-                    server_status = "idle"
-                else:
-                    server_status = "training"
+with c2:
+    st.subheader("🚀 模型微调 (LoRA)")
+    
+    # ===== 修复：正确解析服务器状态 =====
+    server_status = "unknown"
+    lora_status = {"hf": False, "gguf": False}
+    
+    try:
+        resp = requests.get(f"{MANAGER_URL}/status", timeout=2)
+        if resp.status_code == 200:
+            status_data = resp.json()
+            
+            # ✅ 修复1：使用正确的字段名 server_status
+            raw_status = status_data.get("server_status", "stopped")
+            
+            # ✅ 修复2：完整的状态映射逻辑
+            if raw_status == "running":
+                server_status = "idle"  # 推理服务正常运行
+            elif raw_status == "starting":
+                server_status = "starting"  # 推理服务启动中
+            elif raw_status == "stopped":
+                server_status = "training"  # 推理服务停止（通常是在训练）
             else:
                 server_status = "error"
-        except:
-            server_status = "offline"
-        
-        if server_status == "idle":
-            st.success("🟢 服务器就绪 (正在进行推理服务)")
-        elif server_status == "training":
-            st.warning("🟠 正在微调训练中... (推理服务暂停)")
-            st.markdown("⚠️ **注意：** 此时无法进行评分交互，请耐心等待训练完成。")
-        elif server_status == "offline":
-            st.error("🔴 无法连接到 GPU 服务器 (请联系管理员)")
+            
+            # ✅ 修复3：检测 LoRA 状态（GGUF 格式才能实际使用）
+            lora_status["hf"] = status_data.get("lora_available", False)
+            lora_status["gguf"] = status_data.get("lora_gguf_available", False)
+        else:
+            server_status = "error"
+    except Exception as e:
+        server_status = "offline"
+        st.caption(f"⚠️ 连接失败: {e}")
+    
+    # ===== 修复：更准确的状态显示 =====
+    if server_status == "idle":
+        st.success("🟢 服务器就绪 (正在进行推理服务)")
+        # ✅ 修复4：显示 LoRA 状态
+        if lora_status["gguf"]:
+            st.info("🎉 已挂载微调模型 (LoRA-GGUF)")
+        elif lora_status["hf"]:
+            st.warning("⚠️ 检测到 LoRA 权重 (HF 格式)，但未转换为 GGUF 格式，推理服务未挂载")
+    elif server_status == "starting":
+        st.info("🟡 推理服务启动中，请稍候...")
+    elif server_status == "training":
+        st.warning("🟠 正在微调训练中... (推理服务暂停)")
+        st.markdown("⚠️ **注意：** 此时无法进行评分交互，请耐心等待训练完成。")
+    elif server_status == "offline":
+        st.error("🔴 无法连接到 GPU 服务器 (请联系管理员)")
+    else:
+        st.error("🔴 服务器状态异常，请检查日志")
 
         st.markdown("#### 1. 数据准备")
         
@@ -1666,5 +1701,6 @@ with tab5:
                 st.session_state.prompt_config = new_cfg
                 with open(PATHS.prompt_config_file, 'w', encoding='utf-8') as f:
                     json.dump(new_cfg, f, ensure_ascii=False, indent=2)
+
 
 
