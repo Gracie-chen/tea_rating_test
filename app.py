@@ -1980,6 +1980,17 @@ with c2:
         data_count = 0
         
     st.info(f"当前微调数据：**{data_count} 条** | 判例库：**{len(st.session_state.cases[1])} 条**")
+
+    st.markdown("#### 1. 数据准备")
+    
+    if PATHS.training_file.exists():
+        with open(PATHS.training_file, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+        data_count = len(lines)
+    else:
+        data_count = 0
+        
+    st.info(f"当前微调数据：**{data_count} 条** | 判例库：**{len(st.session_state.cases[1])} 条**")
     
     # ===== 修改：覆盖逻辑 =====
     if st.button("🔄 将当前所有判例转为微调数据（覆盖）"):
@@ -2121,6 +2132,7 @@ with tab6:
                     if st.session_state.get(f"judge_out_{l.get('id','')}"):
                         st.markdown("**裁判分析**")
                         st.write(st.session_state.get(f"judge_out_{l.get('id','')}"))
+
 
 
 
