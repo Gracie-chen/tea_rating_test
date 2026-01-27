@@ -1919,40 +1919,29 @@ with tab4:
     
     # --- 右侧：微调控制 ---
 with c2:
-        st.subheader("🚀 模型微调 (LoRA)")
-        
-        server_status = "unknown"
-        try:
-            resp = requests.get(f"{MANAGER_URL}/status", timeout=2)
-            if resp.status_code == 200:
-                status_data = resp.json()
-                if status_data.get("vllm_status") == "running":
-                    server_status = "idle"
-                else:
-                    server_status = "training"
-            else:
-                server_status = "error"
-        except:
-            server_status = "offline"
-        
-        if server_status == "idle":
-            st.success("🟢 服务器就绪 (正在进行推理服务)")
-        elif server_status == "training":
-            st.warning("🟠 正在微调训练中... (推理服务暂停)")
-            st.markdown("⚠️ **注意：** 此时无法进行评分交互，请耐心等待训练完成。")
-        elif server_status == "offline":
-            st.error("🔴 无法连接到 GPU 服务器 (请联系管理员)")
-
-    st.markdown("#### 1. 数据准备")
+    st.subheader("🚀 模型微调 (LoRA)")
     
-    if PATHS.training_file.exists():
-        with open(PATHS.training_file, "r", encoding="utf-8") as f:
-            lines = f.readlines()
-        data_count = len(lines)
-    else:
-        data_count = 0
-        
-    st.info(f"当前微调数据：**{data_count} 条** | 判例库：**{len(st.session_state.cases[1])} 条**")
+    server_status = "unknown"
+    try:
+        resp = requests.get(f"{MANAGER_URL}/status", timeout=2)
+        if resp.status_code == 200:
+            status_data = resp.json()
+            if status_data.get("vllm_status") == "running":
+                server_status = "idle"
+            else:
+                server_status = "training"
+        else:
+            server_status = "error"
+    except:
+        server_status = "offline"
+    
+    if server_status == "idle":
+        st.success("🟢 服务器就绪 (正在进行推理服务)")
+    elif server_status == "training":
+        st.warning("🟠 正在微调训练中... (推理服务暂停)")
+        st.markdown("⚠️ **注意：** 此时无法进行评分交互，请耐心等待训练完成。")
+    elif server_status == "offline":
+        st.error("🔴 无法连接到 GPU 服务器 (请联系管理员)")
 
     st.markdown("#### 1. 数据准备")
     
@@ -2105,6 +2094,7 @@ with tab6:
                     if st.session_state.get(f"judge_out_{l.get('id','')}"):
                         st.markdown("**裁判分析**")
                         st.write(st.session_state.get(f"judge_out_{l.get('id','')}"))
+
 
 
 
