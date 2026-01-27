@@ -1875,7 +1875,7 @@ with colu2:
 
 
 with tab4:
-    MANAGER_URL = "http://117.50.183.138:8001"
+    MANAGER_URL = "http://117.50.89.74:8001"
     c1, c2 = st.columns([5, 5])
     
     with c1:
@@ -2121,5 +2121,6 @@ with tab6:
                     if st.session_state.get(f"judge_out_{l.get('id','')}"):
                         st.markdown("**裁判分析**")
                         st.write(st.session_state.get(f"judge_out_{l.get('id','')}"))
+
 
 
