@@ -576,7 +576,7 @@ class EvaluationLogger:
         return content if content else []
 
     @staticmethod
-    def log_evaluation(text, model_output, expert_output, model_name="Qwen2.5-7B-Instruct"):
+    def log_evaluation(text, model_output, expert_output, model_name="Qwen3-14B"):
         """
         核心：同时记录 AI 的原始输出和专家的校准结果
         """
@@ -1441,7 +1441,7 @@ with st.sidebar:
     st.markdown(f"**评分模型：** `Qwen2.5-7B-Instruct`")
 
     # 默认评分模型（可根据 LoRA 状态切换）
-    model_id = "Qwen2.5-7B-Instruct"
+    model_id = "Qwen2.5-14B"
     try:
         resp = requests.get("http://117.50.89.74:8001/status", timeout=2)
         if resp.status_code == 200 and resp.json().get("lora_available"):
@@ -1597,7 +1597,7 @@ with tab1:
                     st.session_state.prompt_config,
                     embedder,
                     client,
-                    "Qwen2.5-7B-Instruct",
+                    "Qwen2.5-14B",
                     r_num,
                     c_num
                 )
@@ -2075,6 +2075,7 @@ with tab6:
                     if st.session_state.get(f"judge_out_{l.get('id','')}"):
                         st.markdown("**裁判分析**")
                         st.write(st.session_state.get(f"judge_out_{l.get('id','')}"))
+
 
 
 
