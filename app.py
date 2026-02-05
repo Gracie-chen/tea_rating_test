@@ -1857,7 +1857,7 @@ with colu2:
 
 
 with tab4:
-    "http://117.50.138.123:8001" = "http://117.50.138.123:8001"
+
     c1, c2 = st.columns([5, 5])
     
     with c1:
