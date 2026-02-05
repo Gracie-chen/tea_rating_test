@@ -883,7 +883,6 @@ def run_scoring(text: str, kb_res: Tuple, case_res: Tuple, prompt_cfg: Dict, emb
                     f"\n---\n"
                     f"【相似判例】: {c.get('text','')}\n"
                     f"【该判例专家分】{scores_str}\n"
-                    f"【硬约束】如果待评分文本与该判例高度一致（语义基本相同），六因子分数应优先对齐该判例的专家分；只有明确出现相反描述时才允许偏离，并必须在comment里解释偏离原因。\n"
                 )
 
     if not found_cases:
@@ -2084,6 +2083,7 @@ with tab6:
                     if st.session_state.get(f"judge_out_{l.get('id','')}"):
                         st.markdown("**裁判分析**")
                         st.write(st.session_state.get(f"judge_out_{l.get('id','')}"))
+
 
 
 
