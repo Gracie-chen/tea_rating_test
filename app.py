@@ -742,7 +742,7 @@ def _get_graphrag_retriever() -> 'GraphRAGRetriever | None':
 def graphrag_static_kb_context(query_vec: np.ndarray,
                               kb_index: faiss.Index,
                               kb_chunks: List[str],
-                              k_num: int = min(kb_num, 6),
+                              k_num: int = min(r_num,6),
                               top_seed: int = 5,
                               hop: int = 1,
                               max_expand: int = 12) -> Tuple[str, List[str]]:
@@ -2084,6 +2084,7 @@ with tab6:
                     if st.session_state.get(f"judge_out_{l.get('id','')}"):
                         st.markdown("**裁判分析**")
                         st.write(st.session_state.get(f"judge_out_{l.get('id','')}"))
+
 
 
 
