@@ -6,6 +6,7 @@ import numpy as np
 import faiss
 import time
 import pickle
+
 from github import Github, GithubException, Auth
 from pathlib import Path
 from io import BytesIO
@@ -1443,7 +1444,7 @@ with st.sidebar:
     # 默认评分模型（可根据 LoRA 状态切换）
     model_id = "Qwen3-14B"
     try:
-        resp = requests.get("http://117.50.89.74:8001/status", timeout=2)
+        resp = requests.get("http://117.50.138.123:8001/status", timeout=2)
         if resp.status_code == 200 and resp.json().get("lora_available"):
             model_id = "default_lora"
             st.success("🎉 已启用微调模型")
@@ -1856,7 +1857,7 @@ with colu2:
 
 
 with tab4:
-    MANAGER_URL = "http://117.50.89.74:8001"
+    "http://117.50.138.123:8001" = "http://117.50.138.123:8001"
     c1, c2 = st.columns([5, 5])
     
     with c1:
@@ -1904,7 +1905,7 @@ with c2:
     
     server_status = "unknown"
     try:
-        resp = requests.get(f"{MANAGER_URL}/status", timeout=2)
+        resp = requests.get(f"{"http://117.50.138.123:8001"}/status", timeout=2)
         if resp.status_code == 200:
             status_data = resp.json()
             if status_data.get("vllm_status") == "running":
@@ -1958,7 +1959,7 @@ with c2:
                 with open(PATHS.training_file, "rb") as f:
                     with st.spinner("正在上传数据并启动训练任务..."):
                         files = {'file': ('tea_feedback.jsonl', f, 'application/json')}
-                        r = requests.post(f"{MANAGER_URL}/upload_and_train", files=files, timeout=100)
+                        r = requests.post(f"{"http://117.50.138.123:8001"}/upload_and_train", files=files, timeout=100)
                         
                     if r.status_code == 200:
                         st.balloons()
@@ -2075,6 +2076,11 @@ with tab6:
                     if st.session_state.get(f"judge_out_{l.get('id','')}"):
                         st.markdown("**裁判分析**")
                         st.write(st.session_state.get(f"judge_out_{l.get('id','')}"))
+
+
+
+
+
 
 
 
