@@ -1575,7 +1575,7 @@ with tab1:
     st.info("将参考知识库与判例库进行评分。确认结果可一键更新判例库。")
     c1, c2, c3, c4, c5 = st.columns([1, 3, 1, 3, 1])
     r_num = c2.number_input("参考知识库条目数量", 1, 20, 3, key="r1")
-    c_num = c4.number_input("参考判例库条目数量", 1, 20, 2, key="c1")
+    c_num = c4.number_input("参考判例库条目数量", 0, 20, 2, key="c1")
     
     if 'current_user_input' not in st.session_state: st.session_state.current_user_input = ""
     user_input = st.text_area("请输入茶评描述:", value=st.session_state.current_user_input, height=150, key="ui")
@@ -1694,7 +1694,7 @@ with tab2:
     f = st.file_uploader("上传文件 (.txt/.docx)")
     c1, c2, c3, c4, c5 = st.columns([1, 3, 1, 3, 1])
     r_n = c2.number_input("参考知识库条目数量", 1, 20, 3, key="rb")
-    c_n = c4.number_input("参考判例库条目数量", 1, 20, 2, key="cb")
+    c_n = c4.number_input("参考判例库条目数量", 0, 20, 2, key="cb")
     if f and st.button("批量处理"):
         lines = [l.strip() for l in parse_file(f).split('\n') if len(l)>10]
         res, bar = [], st.progress(0)
@@ -2083,6 +2083,7 @@ with tab6:
                     if st.session_state.get(f"judge_out_{l.get('id','')}"):
                         st.markdown("**裁判分析**")
                         st.write(st.session_state.get(f"judge_out_{l.get('id','')}"))
+
 
 
 
