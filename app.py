@@ -844,6 +844,7 @@ def llm_normalize_user_input(raw_query: str, client: OpenAI) -> str:
 def run_scoring(text: str, kb_res: Tuple, case_res: Tuple, prompt_cfg: Dict, embedder: AliyunEmbedder, client: OpenAI, model_id: str, k_num: int, c_num: int):
     """执行 RAG 检索与 LLM 评分"""
     vec = embedder.encode([text], text_type='query').astype("float32")
+    safe_k = min(int(k_num), 6)
     faiss.normalize_L2(vec)
     # Debug：norm 应该约等于 1.0；如果不是，embedding 或 normalize 有问题
     print(f"[DEBUG] query_vec_norm={float(np.linalg.norm(vec[0])):.6f}")
@@ -2083,7 +2084,6 @@ with tab6:
                     if st.session_state.get(f"judge_out_{l.get('id','')}"):
                         st.markdown("**裁判分析**")
                         st.write(st.session_state.get(f"judge_out_{l.get('id','')}"))
-
 
 
 
