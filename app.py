@@ -742,7 +742,7 @@ def _get_graphrag_retriever() -> 'GraphRAGRetriever | None':
 def graphrag_static_kb_context(query_vec: np.ndarray,
                               kb_index: faiss.Index,
                               kb_chunks: List[str],
-                              k_num: int = min(r_num,6),
+                              k_num: int = 3,
                               top_seed: int = 5,
                               hop: int = 1,
                               max_expand: int = 12) -> Tuple[str, List[str]]:
@@ -851,13 +851,15 @@ def run_scoring(text: str, kb_res: Tuple, case_res: Tuple, prompt_cfg: Dict, emb
     # Debug：norm 应该约等于 1.0；如果不是，embedding 或 normalize 有问题
     print(f"[DEBUG] query_vec_norm={float(np.linalg.norm(vec[0])):.6f}")
     
-    # --- KB (External GraphRAG over static KB; exclude cases) ---
+    
+    safe_k = min(int(k_num), 6)
+# --- KB (External GraphRAG over static KB; exclude cases) ---
     ctx_txt, hits = graphrag_static_kb_context(
         query_vec=vec,
         kb_index=kb_res[0],
         kb_chunks=kb_res[1],
-        k_num=k_num,
-        top_seed=max(5, k_num),
+        k_num=safe_k,
+        top_seed=max(5, safe_k),
         hop=1,
         max_expand=12
     )
@@ -1450,9 +1452,9 @@ with st.sidebar:
     st.markdown(f"**评分模型：** `Qwen2.5-7B-Instruct`")
 
     # 默认评分模型（可根据 LoRA 状态切换）
-    model_id = "Qwen2.5-14B"
+    model_id = "Qwen2.5-7B-Instruct"
     try:
-        resp = requests.get("http://117.50.138.123:8001/status", timeout=2)
+        resp = requests.get("http://117.50.89.74:8001/status", timeout=2)
         if resp.status_code == 200 and resp.json().get("lora_available"):
             model_id = "default_lora"
             st.success("🎉 已启用微调模型")
@@ -1865,7 +1867,7 @@ with colu2:
 
 
 with tab4:
-    MANAGER_URL = "http://117.50.138.123:8001"
+    MANAGER_URL = "http://117.50.89.74:8001"
     c1, c2 = st.columns([5, 5])
     
     with c1:
@@ -2084,9 +2086,6 @@ with tab6:
                     if st.session_state.get(f"judge_out_{l.get('id','')}"):
                         st.markdown("**裁判分析**")
                         st.write(st.session_state.get(f"judge_out_{l.get('id','')}"))
-
-
-
 
 
 
