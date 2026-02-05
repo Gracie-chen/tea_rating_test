@@ -799,10 +799,10 @@ def llm_normalize_user_input(raw_query: str, client: OpenAI) -> str:
     """使用 LLM 对用户输入做语义规范化 / 去噪"""
 
     # Note: default-argument expressions are evaluated at function definition time, so we compute here.
-        try:
-            ui_r_num = int(st.session_state.get("r_num", 3))
-        except Exception:
-            ui_r_num = 3
+    try:
+        ui_r_num = int(st.session_state.get("r_num", 3))
+    except Exception:
+        ui_r_num = 3
 
     system_prompt = (
         """
@@ -2083,6 +2083,7 @@ with tab6:
                     if st.session_state.get(f"judge_out_{l.get('id','')}"):
                         st.markdown("**裁判分析**")
                         st.write(st.session_state.get(f"judge_out_{l.get('id','')}"))
+
 
 
 
