@@ -1438,10 +1438,10 @@ with st.sidebar:
     st.markdown("---")
     # 预处理模型（DeepSeek） + 评分模型（本地Qwen推理服务）
     st.markdown(f"**预处理模型：** `Deepseek-chat`")
-    st.markdown(f"**评分模型：** `Qwen2.5-7B-Instruct`")
+    st.markdown(f"**评分模型：** `Qwen3-14B`")
 
     # 默认评分模型（可根据 LoRA 状态切换）
-    model_id = "Qwen2.5-14B"
+    model_id = "Qwen3-14B"
     try:
         resp = requests.get("http://117.50.89.74:8001/status", timeout=2)
         if resp.status_code == 200 and resp.json().get("lora_available"):
@@ -1597,7 +1597,7 @@ with tab1:
                     st.session_state.prompt_config,
                     embedder,
                     client,
-                    "Qwen2.5-14B",
+                    "Qwen3-14B",
                     r_num,
                     c_num
                 )
@@ -2075,6 +2075,7 @@ with tab6:
                     if st.session_state.get(f"judge_out_{l.get('id','')}"):
                         st.markdown("**裁判分析**")
                         st.write(st.session_state.get(f"judge_out_{l.get('id','')}"))
+
 
 
 
