@@ -633,63 +633,63 @@ class AliyunEmbedder:
         dashscope.api_key = api_key # 确保 API KEY 被正确设置给全局
         
     def encode(self, texts: List[str], text_type: str = "document") -> np.ndarray:
+        
+        if not texts:
+            return np.zeros((0, 1024), dtype="float32")
+        if isinstance(texts, str):
+            texts = [texts]
+        try:
+            resp = TextEmbedding.call(model=self.model_name, input=texts)
+            if resp.status_code == HTTPStatus.OK:
+                return np.array([i["embedding"] for i in resp.output["embeddings"]]).astype("float32")
+        except Exception:
+            pass
+        # Fail-soft: return zero vectors instead of raising, so the app can still run
+        return np.zeros((len(texts), 1024), dtype="float32")
 
-if not texts:
-    return np.zeros((0, 1024), dtype="float32")
-if isinstance(texts, str):
-    texts = [texts]
-try:
-    resp = TextEmbedding.call(model=self.model_name, input=texts)
-    if resp.status_code == HTTPStatus.OK:
-        return np.array([i["embedding"] for i in resp.output["embeddings"]]).astype("float32")
-except Exception:
-    pass
-# Fail-soft: return zero vectors instead of raising, so the app can still run
-return np.zeros((len(texts), 1024), dtype="float32")
+    
+    def _ensure_ip_index_from_texts(texts, embedder):
+        """Build an IndexFlatIP (cosine via L2-normalized vectors) from texts."""
+        if not texts:
+            return faiss.IndexFlatIP(1024)
+        vecs = embedder.encode(texts).astype("float32")
+        # normalize for cosine similarity
+        faiss.normalize_L2(vecs)
+        dim = vecs.shape[1] if vecs.ndim == 2 and vecs.shape[0] > 0 else 1024
+        idx = faiss.IndexFlatIP(dim)
+        if vecs.shape[0] > 0:
+            idx.add(vecs)
+        return idx
+    
+    def ensure_case_index_cosine(embedder):
+        """Migrate / rebuild case index to cosine (IP + normalized vectors) if needed."""
+        case_idx, case_data = st.session_state.get("cases", (faiss.IndexFlatIP(1024), []))
+        # If empty, nothing to do
+        if not case_data:
+            st.session_state.cases = (faiss.IndexFlatIP(1024), case_data)
+            return
 
+        # If metric not IP or ntotal mismatch, rebuild
+        metric = getattr(case_idx, "metric_type", None)
+        if metric != faiss.METRIC_INNER_PRODUCT or case_idx.ntotal != len(case_data):
+            texts = [c.get("text", "") for c in case_data]
+            new_idx = _ensure_ip_index_from_texts(texts, embedder)
+            st.session_state.cases = (new_idx, case_data)
+            ResourceManager.save(new_idx, case_data, PATHS.case_index, PATHS.case_data, is_json=True)
 
-def _ensure_ip_index_from_texts(texts, embedder):
-    """Build an IndexFlatIP (cosine via L2-normalized vectors) from texts."""
-    if not texts:
-        return faiss.IndexFlatIP(1024)
-    vecs = embedder.encode(texts).astype("float32")
-    # normalize for cosine similarity
-    faiss.normalize_L2(vecs)
-    dim = vecs.shape[1] if vecs.ndim == 2 and vecs.shape[0] > 0 else 1024
-    idx = faiss.IndexFlatIP(dim)
-    if vecs.shape[0] > 0:
-        idx.add(vecs)
-    return idx
-
-def ensure_case_index_cosine(embedder):
-    """Migrate / rebuild case index to cosine (IP + normalized vectors) if needed."""
-    case_idx, case_data = st.session_state.get("cases", (faiss.IndexFlatIP(1024), []))
-    # If empty, nothing to do
-    if not case_data:
-        st.session_state.cases = (faiss.IndexFlatIP(1024), case_data)
-        return
-
-    # If metric not IP or ntotal mismatch, rebuild
-    metric = getattr(case_idx, "metric_type", None)
-    if metric != faiss.METRIC_INNER_PRODUCT or case_idx.ntotal != len(case_data):
-        texts = [c.get("text", "") for c in case_data]
-        new_idx = _ensure_ip_index_from_texts(texts, embedder)
-        st.session_state.cases = (new_idx, case_data)
-        ResourceManager.save(new_idx, case_data, PATHS.case_index, PATHS.case_data, is_json=True)
-
-def ensure_kb_index_cosine(embedder):
-    """Migrate / rebuild kb index to cosine (IP + normalized vectors) if needed."""
-    kb_idx, kb_chunks = st.session_state.get("kb", (faiss.IndexFlatIP(1024), []))
-    if not kb_chunks:
-        st.session_state.kb = (faiss.IndexFlatIP(1024), kb_chunks)
-        return
-
-    metric = getattr(kb_idx, "metric_type", None)
-    if metric != faiss.METRIC_INNER_PRODUCT or kb_idx.ntotal != len(kb_chunks):
-        new_idx = _ensure_ip_index_from_texts(kb_chunks, embedder)
-        st.session_state.kb = (new_idx, kb_chunks)
-        ResourceManager.save(new_idx, kb_chunks, PATHS.kb_index, PATHS.kb_chunks)
-
+    def ensure_kb_index_cosine(embedder):
+        """Migrate / rebuild kb index to cosine (IP + normalized vectors) if needed."""
+        kb_idx, kb_chunks = st.session_state.get("kb", (faiss.IndexFlatIP(1024), []))
+        if not kb_chunks:
+            st.session_state.kb = (faiss.IndexFlatIP(1024), kb_chunks)
+            return
+    
+        metric = getattr(kb_idx, "metric_type", None)
+        if metric != faiss.METRIC_INNER_PRODUCT or kb_idx.ntotal != len(kb_chunks):
+            new_idx = _ensure_ip_index_from_texts(kb_chunks, embedder)
+            st.session_state.kb = (new_idx, kb_chunks)
+            ResourceManager.save(new_idx, kb_chunks, PATHS.kb_index, PATHS.kb_chunks)
+    
 
 
 
