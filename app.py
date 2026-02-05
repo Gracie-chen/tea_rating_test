@@ -1467,7 +1467,7 @@ with st.sidebar:
     embedder = AliyunEmbedder(aliyun_key)
 
     # 推理服务（本地 vLLM / OpenAI-compatible 网关）：用于 Qwen 评分
-    client = OpenAI(api_key="dummy", base_url="http://117.50.89.74:8000/v1")
+    client = OpenAI(api_key="dummy", base_url="http://117.50.138.123:8000/v1")
 
     # DeepSeek 官方接口：用于预处理清洗
     client_d = OpenAI(api_key=deepseek_key, base_url="https://api.deepseek.com")
@@ -1677,17 +1677,7 @@ with tab1:
         ai_package = st.session_state.last_scores
 
         with st.spinner("同步数据到云端记忆模块..."):
-            # 1. 存入判例库 (原有逻辑)
-            nc_text = st.session_state.get("current_user_input", user_input)
-            nc = {"text": nc_text, "scores": cal_scores, "tags": "交互-校准", "master_comment": cal_master, "created_at": time.strftime("%Y-%m-%d")}
-            st.session_state.cases[1].append(nc)
-            
-            # ✅ embedding 与 nc["text"] 完全一致
-            v = embedder.encode([nc_text]).astype("float32")
-            faiss.normalize_L2(v)
-            st.session_state.cases[0].add(v)
-            ResourceManager.save(st.session_state.cases[0], st.session_state.cases[1], PATHS.case_index, PATHS.case_data, is_json=True)
-            GithubSync.sync_cases(st.session_state.cases[1])
+
             
             # 2. 存入评测日志 (新增逻辑：LLM-as-a-judge 的原料)
             EvaluationLogger.log_evaluation(
@@ -2094,6 +2084,7 @@ with tab6:
                     if st.session_state.get(f"judge_out_{l.get('id','')}"):
                         st.markdown("**裁判分析**")
                         st.write(st.session_state.get(f"judge_out_{l.get('id','')}"))
+
 
 
 
