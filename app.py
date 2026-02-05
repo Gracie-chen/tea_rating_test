@@ -732,7 +732,7 @@ def _get_graphrag_retriever() -> 'GraphRAGRetriever | None':
 def graphrag_static_kb_context(query_vec: np.ndarray,
                               kb_index: faiss.Index,
                               kb_chunks: List[str],
-                              k_num: int = 3,
+                              k_num: Optional[int] = None,
                               top_seed: int = 5,
                               hop: int = 1,
                               max_expand: int = 12) -> Tuple[str, List[str]]:
@@ -797,6 +797,15 @@ def graphrag_static_kb_context(query_vec: np.ndarray,
 
 def llm_normalize_user_input(raw_query: str, client: OpenAI) -> str:
     """使用 LLM 对用户输入做语义规范化 / 去噪"""
+
+    # Allow default k_num to follow the user's UI setting (r_num) when not explicitly passed.
+    # Note: default-argument expressions are evaluated at function definition time, so we compute here.
+    if k_num is None:
+        try:
+            ui_r_num = int(st.session_state.get("r_num", 3))
+        except Exception:
+            ui_r_num = 3
+        k_num = min(ui_r_num, 6)
     system_prompt = (
         """
           A. 角色与目标
