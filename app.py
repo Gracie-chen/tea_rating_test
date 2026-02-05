@@ -851,7 +851,7 @@ def run_scoring(text: str, kb_res: Tuple, case_res: Tuple, prompt_cfg: Dict, emb
     print(f"[DEBUG] query_vec_norm={float(np.linalg.norm(vec[0])):.6f}")
     
     
-    safe_k = min(int(k_num), 6)
+
 # --- KB (External GraphRAG over static KB; exclude cases) ---
     ctx_txt, hits = graphrag_static_kb_context(
         query_vec=vec,
