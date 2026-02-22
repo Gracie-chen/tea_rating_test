@@ -6,8 +6,7 @@ import numpy as np
 import faiss
 import time
 import pickle
-
-from github import Github, GithubException, Auth
+from github import Github, GithubException, Auth  # 新增 Auth
 from pathlib import Path
 from io import BytesIO
 from typing import List, Dict, Any, Tuple, Optional
@@ -19,7 +18,7 @@ from openai import OpenAI
 from docx import Document
 import matplotlib.pyplot as plt
 from scipy.interpolate import make_interp_spline
-from graphrag_retriever import GraphRAGRetriever
+from graphrag_retriever import GraphRAGRetriever, GraphRAGIndexer, Chunk
 import base64
 
 # ==========================================
@@ -55,11 +54,10 @@ class PathConfig:
     # 运行时数据目录
     DATA_DIR = Path("./tea_data")
     RAG_DIR = Path("./tea_data/RAG")  # RAG文件存储目录
-        
+    
     def __init__(self):
         self.DATA_DIR.mkdir(exist_ok=True)
-        self.RAG_DIR.mkdir(exist_ok=True)
-    
+        self.RAG_DIR.mkdir(exist_ok=True)  # 确保RAG目录存在
         self.GRAPHRAG_DIR = self.DATA_DIR / "graphrag_artifacts"
         self.GRAPHRAG_DIR.mkdir(exist_ok=True)
         # 向量库与持久化数据
@@ -146,7 +144,7 @@ class ResourceManager:
                     data = json.load(f) if is_json else pickle.load(f)
                 return index, data
             except: pass
-        return faiss.IndexFlatIP(1024), []
+        return faiss.IndexFlatL2(1024), []
 
     # ===== 微调相关方法 =====
     @staticmethod
@@ -160,7 +158,7 @@ class ResourceManager:
                     scores = c.get("scores", {})
                     master_comment = c.get("master_comment", "（人工校准）")
                     
-                    user_content = user_tpl.format(product_desc=case_text, context_text="", case_text="")
+                    user_content = user_tpl.replace("{product_desc}", case_text).replace("{context_text}", "").replace("{case_text}", "")
                     assistant_content = json.dumps({"master_comment": master_comment, "scores": scores}, ensure_ascii=False)
                     entry = {
                         "messages": [
@@ -268,77 +266,50 @@ class GithubSync:
         except Exception as e:
             st.error(f"Github 同步失败: {str(e)}")
             return False
-    @staticmethod
-    def load_json(file_path_in_repo: str, default=None):
-        """从 Github 读取 JSON 文件；不存在/读取失败则返回 default"""
-        if default is None:
-            default = []
-    
-        g, repo_name, branch = GithubSync._get_github_client()
-        if not g or not repo_name:
-            return default
-    
-        try:
-            repo = g.get_repo(repo_name)
-            contents = repo.get_contents(file_path_in_repo, ref=branch)
-            raw = contents.decoded_content.decode("utf-8").strip()
-            if not raw:
-                return default
-            return json.loads(raw)
-    
-        except GithubException as e:
-            if getattr(e, "status", None) == 404:
-                return default
-            st.error(f"Github 读取失败: {str(e)}")
-            return default
-    
-        except Exception as e:
-            st.error(f"Github 读取失败: {str(e)}")
-            return default
-    
+
     @staticmethod
     def push_binary_file(file_path_in_repo: str, file_content: bytes, commit_msg: str = "Upload file") -> bool:
-            """推送二进制文件到 Github (如PDF, DOCX等)
+        """推送二进制文件到 Github (如PDF, DOCX等)
+        
+        重要：PyGithub的create_file/update_file接受bytes类型时会自动进行base64编码
+        不要手动编码，否则会导致双重编码！
+        """
+        g, repo_name, branch = GithubSync._get_github_client()
+        
+        if not g or not repo_name:
+            st.error("❌ 未配置 Github Token 或 仓库名")
+            return False
+
+        try:
+            repo = g.get_repo(repo_name)
+            # 注意：直接传bytes，PyGithub会自动base64编码
+            # 不要手动编码！否则会导致双重编码，文件损坏
             
-            重要：PyGithub的create_file/update_file接受bytes类型时会自动进行base64编码
-            不要手动编码，否则会导致双重编码！
-            """
-            g, repo_name, branch = GithubSync._get_github_client()
-            
-            if not g or not repo_name:
-                st.error("❌ 未配置 Github Token 或 仓库名")
-                return False
-    
             try:
-                repo = g.get_repo(repo_name)
-                # 注意：直接传bytes，PyGithub会自动base64编码
-                # 不要手动编码！否则会导致双重编码，文件损坏
-                
-                try:
-                    contents = repo.get_contents(file_path_in_repo, ref=branch)
-                    repo.update_file(
-                        path=contents.path,
-                        message=commit_msg,
+                contents = repo.get_contents(file_path_in_repo, ref=branch)
+                repo.update_file(
+                    path=contents.path,
+                    message=commit_msg,
+                    content=file_content,  # 直接传bytes
+                    sha=contents.sha,
+                    branch=branch
+                )
+            except GithubException as e:
+                if e.status == 404:
+                    repo.create_file(
+                        path=file_path_in_repo,
+                        message=f"Create {file_path_in_repo}",
                         content=file_content,  # 直接传bytes
-                        sha=contents.sha,
                         branch=branch
                     )
-                except GithubException as e:
-                    if e.status == 404:
-                        repo.create_file(
-                            path=file_path_in_repo,
-                            message=f"Create {file_path_in_repo}",
-                            content=file_content,  # 直接传bytes
-                            branch=branch
-                        )
-                    else:
-                        raise e
-                return True
-    
-            except Exception as e:
-                st.error(f"Github 文件上传失败: {str(e)}")
-                return False
-    
+                else:
+                    raise e
+            return True
+
+        except Exception as e:
+            st.error(f"Github 文件上传失败: {str(e)}")
+            return False
+
     @staticmethod
     def delete_file(file_path_in_repo: str, commit_msg: str = "Delete file") -> bool:
         """从 Github 删除文件"""
@@ -369,9 +340,29 @@ class GithubSync:
             return False
 
     @staticmethod
+    def backup_rag_file(file_content: bytes, filename: str, backup_folder: str = "tea_backup") -> bool:
+        """
+        将RAG文件备份到tea_backup文件夹（只做加法，不删除）
+        - file_content: 文件内容bytes
+        - filename: 文件名
+        - backup_folder: 备份文件夹路径
+        返回: 是否成功
+        """
+        file_path = f"{backup_folder}/{filename}"
+        try:
+            result = GithubSync.push_binary_file(file_path, file_content, f"Backup RAG file: {filename}")
+            if result:
+                print(f"[INFO] ✅ 已备份到 {file_path}")
+            return result
+        except Exception as e:
+            print(f"[WARN] 备份文件 {filename} 到 {backup_folder} 失败: {e}")
+            return False
+
+    @staticmethod
     def add_rag_files(uploaded_files: List, rag_folder: str = "tea_data/RAG") -> Tuple[bool, List[str]]:
         """
         添加RAG文件到GitHub（只添加，不删除现有文件）
+        同时备份到 tea_backup 文件夹（只做加法）
         - uploaded_files: Streamlit上传的文件对象列表
         - rag_folder: GitHub上的RAG文件夹路径
         返回: (是否成功, 成功上传的文件名列表)
@@ -390,6 +381,8 @@ class GithubSync:
                 file_content = uf.read()
                 if GithubSync.push_binary_file(file_path, file_content, f"Add RAG file: {uf.name}"):
                     uploaded_names.append(uf.name)
+                    # >>> 变更3：同时备份到 tea_backup 文件夹 <<<
+                    GithubSync.backup_rag_file(file_content, uf.name, backup_folder="tea_backup")
                 else:
                     st.warning(f"⚠️ 上传 {uf.name} 失败")
             
@@ -426,7 +419,7 @@ class GithubSync:
     @staticmethod
     def delete_rag_file(filename: str, rag_folder: str = "tea_data/RAG") -> bool:
         """
-        从GitHub删除单个RAG文件
+        从GitHub删除单个RAG文件（仅从tea_data/RAG删除，tea_backup中保留）
         - filename: 要删除的文件名
         - rag_folder: GitHub上的RAG文件夹路径
         返回: 是否成功
@@ -566,64 +559,7 @@ class GithubSync:
             traceback.print_exc()
             return []
 
-# --- [新增] 日志与评测管理类 ---
-class EvaluationLogger:
-    FILE_NAME = "tea_data/eval_logs.json"
 
-    @staticmethod
-    def load_logs():
-        """从 GitHub 同步并加载日志"""
-        content = GithubSync.load_json(EvaluationLogger.FILE_NAME)
-        return content if content else []
-
-    @staticmethod
-    def log_evaluation(text, model_output, expert_output, model_name="Qwen3-14B"):
-        """
-        核心：同时记录 AI 的原始输出和专家的校准结果
-        """
-        logs = EvaluationLogger.load_logs()
-        new_entry = {
-            "id": str(int(time.time())),
-            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
-            "input_text": text,
-            "model_prediction": model_output, # 原始预测包 (scores + master_comment)
-            "expert_ground_truth": expert_output, # 专家修正包 (scores + master_comment)
-            "analysis": None,
-            "meta": {"model": model_name}
-        }
-        logs.insert(0, new_entry) # 最新记录在前
-        if len(logs) > 500: logs = logs[:500] # 限制日志长度
-        GithubSync.push_json(EvaluationLogger.FILE_NAME, logs, f"Eval log {new_entry['id']}")
-        return logs
-
-    @staticmethod
-    def run_judge(log_id, llm_client):
-        """运行 LLM 裁判：分析 AI 为什么评错了"""
-        logs = EvaluationLogger.load_logs()
-        target = next((l for l in logs if l["id"] == log_id), None)
-        if not target or not target.get("expert_ground_truth"): return "缺少对比数据"
-
-        judge_prompt = f"""
-        你是一名茶叶感官审评专家教练。请对比以下“模型评分”与“专家标准评分”，分析差异原因。
-        【原始评语】: {target['input_text']}
-        【模型原始分】: {json.dumps(target['model_prediction'], ensure_ascii=False)}
-        【专家校准分】: {json.dumps(target['expert_ground_truth'], ensure_ascii=False)}
-        请输出简短的误差分析：
-        1. 哪些维度偏差较大？2. 模型误解了评语中的哪个关键描述？3. 针对此案例，应如何优化 Prompt？
-        """
-        try:
-            resp = llm_client.chat.completions.create(
-                model="deepseek-chat",
-                messages=[{"role": "user", "content": judge_prompt}]
-            )
-            analysis = resp.choices[0].message.content
-            # 更新日志并同步
-            for l in logs:
-                if l["id"] == log_id: l["analysis"] = analysis
-            GithubSync.push_json(EvaluationLogger.FILE_NAME, logs, f"Update judge {log_id}")
-            return analysis
-        except Exception as e:
-            return f"裁判分析失败: {str(e)}"
 # ==========================================
 # [SECTION 2] AI 服务 (Embedding & LLM)
 # ==========================================
@@ -631,68 +567,56 @@ class EvaluationLogger:
 class AliyunEmbedder:
     def __init__(self, api_key):
         self.model_name = "text-embedding-v4"
-        dashscope.api_key = api_key # 确保 API KEY 被正确设置给全局
-        
-    def encode(self, texts: List[str], text_type: str = "document") -> np.ndarray:
-        
-        if not texts:
-            return np.zeros((0, 1024), dtype="float32")
-        if isinstance(texts, str):
-            texts = [texts]
+        dashscope.api_key = api_key 
+
+    def encode(self, texts: List[str]) -> np.ndarray:
+        if not texts: return np.zeros((0, 1024), dtype="float32")
+        if isinstance(texts, str): texts = [texts]
         try:
             resp = TextEmbedding.call(model=self.model_name, input=texts)
             if resp.status_code == HTTPStatus.OK:
-                return np.array([i["embedding"] for i in resp.output["embeddings"]]).astype("float32")
-        except Exception:
-            pass
-        # Fail-soft: return zero vectors instead of raising, so the app can still run
+                return np.array([i['embedding'] for i in resp.output['embeddings']]).astype("float32")
+        except: pass
         return np.zeros((len(texts), 1024), dtype="float32")
 
-    
-    def _ensure_ip_index_from_texts(texts, embedder):
-        """Build an IndexFlatIP (cosine via L2-normalized vectors) from texts."""
-        if not texts:
-            return faiss.IndexFlatIP(1024)
-        vecs = embedder.encode(texts).astype("float32")
-        # normalize for cosine similarity
-        faiss.normalize_L2(vecs)
-        dim = vecs.shape[1] if vecs.ndim == 2 and vecs.shape[0] > 0 else 1024
-        idx = faiss.IndexFlatIP(dim)
-        if vecs.shape[0] > 0:
-            idx.add(vecs)
-        return idx
-    
-    def ensure_case_index_cosine(embedder):
-        """Migrate / rebuild case index to cosine (IP + normalized vectors) if needed."""
-        case_idx, case_data = st.session_state.get("cases", (faiss.IndexFlatIP(1024), []))
-        # If empty, nothing to do
-        if not case_data:
-            st.session_state.cases = (faiss.IndexFlatIP(1024), case_data)
-            return
+def llm_normalize_user_input(raw_query: str, client: OpenAI) -> str:
+    """使用 LLM 对用户输入做语义规范化 / 去噪"""
+    system_prompt = (
+        """
+          A. 角色与目标
+          你是"茶评清洗器"。你的任务是从输入文本中提取并输出只与茶评相关的信息，删除无关内容，保持原意与原有表述风格，只能删减不能修改。
+          B. 什么算"相关信息"（保留）
+          仅保留与以下内容有关的句子/短语：
+          茶的基本信息：茶名/品类、产地、年份、工艺、等级、原料、香型等
+          干茶/茶汤/叶底：外观、色泽、条索、汤色、叶底描述
+          香气与滋味：香气类型、强弱、层次、回甘、生津、涩感、苦感、甜度、醇厚度、喉韵、体感等
+          冲泡信息与表现：器具、投茶量、水温、时间、出汤、几泡变化、耐泡度、适饮建议
+          主观评价与结论：好喝/一般/缺点/性价比
+          C. 什么算"无关信息"（删除）
+          删除与茶评无直接关系的内容，例如：
+          与茶无关的生活日常、情绪宣泄、社交聊天、段子
+          店铺/物流/客服/包装破损/发货慢（除非"包装异味影响茶"这类直接影响品饮）
+          广告、价格链接、优惠券、引流话术、品牌吹水（除非是"性价比"且与品饮结论相关）
+          与其它产品/话题无关的对比闲聊
+          凑字数内容
+          D. 输出格式
+          只输出清洗后的茶评正文，不要解释、不加标题、不输出"删除了什么"
+          如果输入中没有任何茶评相关信息，则输出："无相关茶评信息"
+          E. 操作原则
+          尽量保留原句；只做删除/少量拼接
+          不要补充不存在的细节，不要推测        
+          """
+    )
 
-        # If metric not IP or ntotal mismatch, rebuild
-        metric = getattr(case_idx, "metric_type", None)
-        if metric != faiss.METRIC_INNER_PRODUCT or case_idx.ntotal != len(case_data):
-            texts = [c.get("text", "") for c in case_data]
-            new_idx = _ensure_ip_index_from_texts(texts, embedder)
-            st.session_state.cases = (new_idx, case_data)
-            ResourceManager.save(new_idx, case_data, PATHS.case_index, PATHS.case_data, is_json=True)
-
-    def ensure_kb_index_cosine(embedder):
-        """Migrate / rebuild kb index to cosine (IP + normalized vectors) if needed."""
-        kb_idx, kb_chunks = st.session_state.get("kb", (faiss.IndexFlatIP(1024), []))
-        if not kb_chunks:
-            st.session_state.kb = (faiss.IndexFlatIP(1024), kb_chunks)
-            return
-    
-        metric = getattr(kb_idx, "metric_type", None)
-        if metric != faiss.METRIC_INNER_PRODUCT or kb_idx.ntotal != len(kb_chunks):
-            new_idx = _ensure_ip_index_from_texts(kb_chunks, embedder)
-            st.session_state.kb = (new_idx, kb_chunks)
-            ResourceManager.save(new_idx, kb_chunks, PATHS.kb_index, PATHS.kb_chunks)
-    
-
-
+    resp = client.chat.completions.create(
+        model="deepseek-chat",
+        temperature=0,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": raw_query}
+        ]
+    )
+    return resp.choices[0].message.content.strip()
 
 # ==========================================
 # [SECTION 1.5] External GraphRAG static KB retrieval (via graphrag_retriever.py)
@@ -743,10 +667,14 @@ def graphrag_static_kb_context(query_vec: np.ndarray,
     # Vector seeds
     D, I = kb_index.search(query_vec, max(k_num, top_seed))
     vector_hits: List[Tuple[str, float]] = []
-    for score, idx in zip(D[0].tolist(), I[0].tolist()):
+    for dist, idx in zip(D[0].tolist(), I[0].tolist()):
         if idx is None or idx < 0 or idx >= len(kb_chunks):
             continue
-        vector_hits.append((str(idx), float(score)))
+        # NOTE: kb_index is IndexFlatL2 -> D is L2 distance (smaller is better).
+        # GraphRAGRetriever expects a vector score where larger is better,
+        # so we convert distance to a bounded similarity.
+        sim = 1.0 / (1.0 + float(dist))
+        vector_hits.append((str(idx), sim))
 
     # Map for retriever
     chunk_text_map = {str(i): kb_chunks[i] for i in range(len(kb_chunks))}
@@ -768,22 +696,27 @@ def graphrag_static_kb_context(query_vec: np.ndarray,
             w_vec=0.7,
             w_graph=0.3
         )
-        seeds = expanded.get("seeds", [])
-        exp_chunks = expanded.get("expanded", [])
+        seeds = expanded.get("seed_chunks", [])
+        exp_chunks = expanded.get("expanded_chunks", [])
         comm = expanded.get("community_summaries", [])
+
+        # Extract text from result dicts
+        seed_texts = [s.get("text", "") for s in seeds if s.get("text")]
+        exp_texts = [c.get("text", "") for c in exp_chunks if c.get("text")]
+        comm_texts = [c.get("summary", "") for c in comm if c.get("summary")]
 
         # Compose: community summaries first (global), then seeds, then expanded
         parts = []
-        if comm:
-            parts.append("【GraphRAG 社区摘要】\n" + "\n\n".join(comm[:2]))
-        if seeds:
-            parts.append("【向量检索种子片段】\n" + "\n".join([f"- {s[:240].strip()}..." for s in seeds[:k_num]]))
-        if exp_chunks:
-            parts.append("【Graph 扩展片段】\n" + "\n".join([f"- {c[:240].strip()}..." for c in exp_chunks[:k_num]]))
+        if comm_texts:
+            parts.append("【GraphRAG 社区摘要】\n" + "\n\n".join(comm_texts[:2]))
+        if seed_texts:
+            parts.append("【向量检索种子片段】\n" + "\n".join([f"- {s[:240].strip()}..." for s in seed_texts[:k_num]]))
+        if exp_texts:
+            parts.append("【Graph 扩展片段】\n" + "\n".join([f"- {c[:240].strip()}..." for c in exp_texts[:k_num]]))
         ctx = "\n\n".join(parts) if parts else "（无手册资料）"
 
         hits_texts = []
-        for t in (seeds + exp_chunks):
+        for t in (seed_texts + exp_texts):
             if t and t not in hits_texts:
                 hits_texts.append(t)
             if len(hits_texts) >= k_num:
@@ -795,102 +728,40 @@ def graphrag_static_kb_context(query_vec: np.ndarray,
         ctx = "\n".join([f"- {h[:240].strip()}..." for h in hits]) if hits else "（无手册资料）"
         return ctx, hits
 
-def llm_normalize_user_input(raw_query: str, client: OpenAI) -> str:
-    """使用 LLM 对用户输入做语义规范化 / 去噪"""
-
-    # Note: default-argument expressions are evaluated at function definition time, so we compute here.
-    try:
-        ui_r_num = int(st.session_state.get("r_num", 3))
-    except Exception:
-        ui_r_num = 3
-
-    system_prompt = (
-        """
-          A. 角色与目标
-          你是"茶评清洗器"。你的任务是从输入文本中提取并输出只与茶评相关的信息，删除无关内容，保持原意与原有表述风格，只能删减不能修改。
-          B. 什么算"相关信息"（保留）
-          仅保留与以下内容有关的句子/短语：
-          茶的基本信息：茶名/品类、产地、年份、工艺、等级、原料、香型等
-          干茶/茶汤/叶底：外观、色泽、条索、汤色、叶底描述
-          香气与滋味：香气类型、强弱、层次、回甘、生津、涩感、苦感、甜度、醇厚度、喉韵、体感等
-          冲泡信息与表现：器具、投茶量、水温、时间、出汤、几泡变化、耐泡度、适饮建议
-          主观评价与结论：好喝/一般/缺点/性价比
-          C. 什么算"无关信息"（删除）
-          删除与茶评无直接关系的内容，例如：
-          与茶无关的生活日常、情绪宣泄、社交聊天、段子
-          店铺/物流/客服/包装破损/发货慢（除非"包装异味影响茶"这类直接影响品饮）
-          广告、价格链接、优惠券、引流话术、品牌吹水（除非是"性价比"且与品饮结论相关）
-          与其它产品/话题无关的对比闲聊
-          凑字数内容
-          D. 输出格式
-          只输出清洗后的茶评正文，不要解释、不加标题、不输出"删除了什么"
-          如果输入中没有任何茶评相关信息，则输出："无相关茶评信息"
-          E. 操作原则
-          尽量保留原句；只做删除/少量拼接
-          不要补充不存在的细节，不要推测        
-          """
-    )
-
-    resp = client.chat.completions.create(
-        model="deepseek-chat",
-        temperature=0,
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": raw_query}
-        ]
-    )
-    return resp.choices[0].message.content.strip()
-
 def run_scoring(text: str, kb_res: Tuple, case_res: Tuple, prompt_cfg: Dict, embedder: AliyunEmbedder, client: OpenAI, model_id: str, k_num: int, c_num: int):
-    """执行 RAG 检索与 LLM 评分"""
-    vec = embedder.encode([text], text_type='query').astype("float32")
-    safe_k = min(int(k_num), 6)
-    faiss.normalize_L2(vec)
-    # Debug：norm 应该约等于 1.0；如果不是，embedding 或 normalize 有问题
-    print(f"[DEBUG] query_vec_norm={float(np.linalg.norm(vec[0])):.6f}")
+    """执行 RAG 检索与 LLM 评分
     
+    返回: (scores_dict, kb_hits, found_cases, system_prompt, user_prompt)
+    """
+    vec = embedder.encode([text]) 
     
-
-# --- KB (External GraphRAG over static KB; exclude cases) ---
+    # --- KB (External GraphRAG over static KB) ---
     ctx_txt, hits = graphrag_static_kb_context(
         query_vec=vec,
         kb_index=kb_res[0],
         kb_chunks=kb_res[1],
-        k_num=safe_k,
-        top_seed=max(5, safe_k),
+        k_num=k_num,
+        top_seed=max(5, k_num),
         hop=1,
         max_expand=12
     )
-
-    # --- CASES ---
-    case_txt, found_cases = "", []
+    
+    case_txt, found_cases = "（无相似判例）", []
     if case_res[0].ntotal > 0:
         _, idx = case_res[0].search(vec, c_num)
         for i in idx[0]:
-            if 0 <= i < len(case_res[1]):
+            if i < len(case_res[1]) and i >= 0:
                 c = case_res[1][i]
                 found_cases.append(c)
-
-                score_details = []
-                for factor, info in c.get("scores", {}).items():
-                    if isinstance(info, dict):
-                        score_details.append(
-                            f"{factor}: {info.get('score')}分 (理由: {info.get('comment', '无')})"
-                        )
-                scores_str = " | ".join(score_details)
-
-                case_txt += (
-                    f"\n---\n"
-                    f"【相似判例】: {c.get('text','')}\n"
-                    f"【该判例专家分】{scores_str}\n"
-                )
-
-    if not found_cases:
-        case_txt = "（无相似判例）"
+                sc = c.get('scores', {})
+                u_sc = sc.get('优雅性',{}).get('score', 0) if isinstance(sc,dict) and '优雅性' in sc else 0
+                k_sc = sc.get('苦涩度',{}).get('score', 0) if isinstance(sc,dict) and '苦涩度' in sc else 0
+                case_txt += f"\n参考案例: {c['text'][:30]}... -> 优雅性:{u_sc} 苦涩度:{k_sc}"
 
     sys_p = prompt_cfg.get('system_template', "")
-    user_p = prompt_cfg.get('user_template', "").format(product_desc=text, context_text=ctx_txt, case_text=case_txt)
-
+    user_p = prompt_cfg.get('user_template', "")
+    user_p = user_p.replace("{product_desc}", text).replace("{context_text}", ctx_txt).replace("{case_text}", case_txt)
+    
     try:
         resp = client.chat.completions.create(
             model=model_id,
@@ -898,10 +769,11 @@ def run_scoring(text: str, kb_res: Tuple, case_res: Tuple, prompt_cfg: Dict, emb
             response_format={"type": "json_object"},
             temperature=0.3
         )
-        return json.loads(resp.choices[0].message.content), hits, found_cases
+        # >>> 变更1：返回 sys_p 和 user_p 供 Tab1 展示 <<<
+        return json.loads(resp.choices[0].message.content), hits, found_cases, sys_p, user_p
     except Exception as e:
         st.error(f"Inference Error: {e}")
-        return None, [], []
+        return None, [], [], sys_p, user_p
 
 # ==========================================
 # [SECTION 3] 辅助与可视化
@@ -1035,8 +907,6 @@ def create_word_report(results: List[Dict]) -> BytesIO:
 
 def plot_flavor_shape(scores_data: Dict):
     """绘制风味形态图"""
-    if not scores_data or not isinstance(scores_data, dict) or "scores" not in scores_data:
-        return None  # 没有分数就不画图
     s = scores_data["scores"]
     top = (s["优雅性"]["score"] + s["辨识度"]["score"]) / 2
     mid = (s["协调性"]["score"] + s["饱和度"]["score"]) / 2
@@ -1090,18 +960,9 @@ def bootstrap_seed_cases(embedder: AliyunEmbedder):
         return
 
     texts = [c["text"] for c in seed_cases]
-    
-    all_vecs = []
-    batch_size = 10
-    for i in range(0, len(texts), batch_size):
-        batch = texts[i:i+batch_size]
-        vecs = embedder.encode(batch)
-        all_vecs.append(vecs)
-    
-    vecs = np.vstack(all_vecs)
-    faiss.normalize_L2(vecs)
+    vecs = embedder.encode(texts)
 
-    if case_idx.ntotal == 0: case_idx = faiss.IndexFlatIP(1024)
+    if case_idx.ntotal == 0: case_idx = faiss.IndexFlatL2(1024)
     if len(vecs) > 0:
         case_idx.add(vecs)
         case_data.extend(seed_cases)
@@ -1170,12 +1031,12 @@ def load_rag_from_github(aliyun_key: str) -> Tuple[bool, str]:
         # 4. 向量化并构建索引
         print("\n[INFO] 步骤 4/4: 向量化并构建 FAISS 索引...")
         temp_embedder = AliyunEmbedder(aliyun_key)
-        kb_idx = faiss.IndexFlatIP(1024)
+        kb_idx = faiss.IndexFlatL2(1024)
         
-        print(f"[INFO]   → 调用阿里云 Embedding API (批次大小: 10)...")
+        print(f"[INFO]   → 调用阿里云 Embedding API (批次大小: 25)...")
         
         # 分批向量化，避免 API 限制
-        batch_size = 10
+        batch_size = 25
         all_vecs = []
         for i in range(0, len(chunks), batch_size):
             batch = chunks[i:i+batch_size]
@@ -1193,7 +1054,6 @@ def load_rag_from_github(aliyun_key: str) -> Tuple[bool, str]:
         
         vecs = np.vstack(all_vecs)
         print(f"[INFO]   ✓ 获得向量: {vecs.shape}")
-        faiss.normalize_L2(vecs)
         
         kb_idx.add(vecs)
         print(f"[INFO]   ✓ FAISS 索引构建完成 (共 {kb_idx.ntotal} 条)")
@@ -1205,6 +1065,27 @@ def load_rag_from_github(aliyun_key: str) -> Tuple[bool, str]:
         # Build GraphRAG-style community summaries for static KB chunks (non-case)
         ResourceManager.save(kb_idx, chunks, PATHS.kb_index, PATHS.kb_chunks)
         ResourceManager.save_kb_files(file_names)
+
+        # 6. (Offline / semi-offline) Build GraphRAG artifacts for the static KB
+        #    This enables GraphRAGRetriever to expand vector seeds by graph neighborhoods.
+        try:
+            kb_out_dir = str(PATHS.GRAPHRAG_DIR)
+            os.makedirs(kb_out_dir, exist_ok=True)
+
+            # Build a lightweight graph from chunks.
+            # For production, you can swap RuleBasedExtractor with an LLM-assisted extractor.
+            indexer = GraphRAGIndexer()  # default RuleBasedExtractor
+            indexer.add_chunks([
+                Chunk(chunk_id=str(i), text=chunks[i], source="kb")
+                for i in range(len(chunks))
+            ])
+            indexer.build_communities(min_size=5)
+            # community summaries are optional; can be added by an external batch job
+            indexer.save(kb_out_dir)
+            print(f"[INFO]   ✓ GraphRAG artifacts saved to: {kb_out_dir}")
+        except Exception as e:
+            # Do not fail the whole loading if graph build is unavailable.
+            print(f"[WARN]   GraphRAG artifact build failed (fallback to vector-only): {e}")
         
         success_files = [f for f in file_names if f not in parse_failed]
         msg = f"✅ 成功加载 {len(chunks)} 条知识片段\n📁 来源文件: {', '.join(success_files)}"
@@ -1280,11 +1161,10 @@ def show_cases_dialog(embedder: AliyunEmbedder):
             new_cases = [c for i, c in enumerate(cases) if i not in selected_to_delete]
             
             # 重建FAISS索引
-            new_idx = faiss.IndexFlatIP(1024)
+            new_idx = faiss.IndexFlatL2(1024)
             if new_cases:
                 texts = [c["text"] for c in new_cases]
                 vecs = embedder.encode(texts)
-                faiss.normalize_L2(vecs)
                 new_idx.add(vecs)
             
             st.session_state.cases = (new_idx, new_cases)
@@ -1347,10 +1227,9 @@ def edit_case_dialog(case_idx: int, embedder: AliyunEmbedder):
             }
             
             # 重建FAISS索引（因为文本可能变了）
-            new_idx = faiss.IndexFlatIP(1024)
+            new_idx = faiss.IndexFlatL2(1024)
             texts = [c["text"] for c in cases]
             vecs = embedder.encode(texts)
-            faiss.normalize_L2(vecs)
             new_idx.add(vecs)
             
             st.session_state.cases = (new_idx, cases)
@@ -1384,8 +1263,6 @@ if 'loaded' not in st.session_state:
     print("[INFO] 步骤 1/3: 加载本地缓存数据...")
     kb_idx, kb_data = ResourceManager.load(PATHS.kb_index, PATHS.kb_chunks)
     case_idx, case_data = ResourceManager.load(PATHS.case_index, PATHS.case_data, is_json=True)
-    # (removed) case self-heal moved to cosine-migration helper after embedder init
-
     st.session_state.kb = (kb_idx, kb_data)
     st.session_state.cases = (case_idx, case_data)
     st.session_state.kb_files = ResourceManager.load_kb_files()
@@ -1444,57 +1321,47 @@ with st.sidebar:
         st.success("✅ API 就绪")
 
     st.markdown("---")
-    # 预处理模型（DeepSeek） + 评分模型（本地Qwen推理服务）
     st.markdown(f"**预处理模型：** `Deepseek-chat`")
     st.markdown(f"**评分模型：** `Qwen3-14B`")
-
-    # 默认评分模型（可根据 LoRA 状态切换）
     model_id = "Qwen3-14B"
     try:
         resp = requests.get("http://117.50.138.123:8001/status", timeout=2)
         if resp.status_code == 200 and resp.json().get("lora_available"):
             model_id = "default_lora"
             st.success("🎉 已启用微调模型")
-    except Exception:
+    except:
         pass
-
     ft_status = ResourceManager.load_ft_status()
     if ft_status and ft_status.get("status") == "succeeded":
         st.info(f"🎉 发现微调模型：`{ft_status.get('fine_tuned_model')}`")
 
-    # Embedding（阿里云 DashScope）
     embedder = AliyunEmbedder(aliyun_key)
-
-    # 推理服务（本地 vLLM / OpenAI-compatible 网关）：用于 Qwen 评分
     client = OpenAI(api_key="dummy", base_url="http://117.50.138.123:8000/v1")
-
-    # DeepSeek 官方接口：用于预处理清洗
     client_d = OpenAI(api_key=deepseek_key, base_url="https://api.deepseek.com")
-
-    # 初始化判例库
+    
     bootstrap_seed_cases(embedder)
-
+    
     st.markdown("---")
-
+    
     # ===== 延迟加载 RAG 逻辑 =====
     kb_files = st.session_state.get('kb_files', [])
     kb_count = len(st.session_state.kb[1])
     case_count = len(st.session_state.cases[1])
-
+    
     # 检查是否需要从 GitHub 加载 RAG
     if st.session_state.get('rag_loading_needed', False):
         loading_status = st.session_state.get('rag_loading_status', 'pending')
-
+        
         if loading_status == 'pending':
             # 显示加载状态
             with st.status("🔄 正在从 GitHub 加载知识库...", expanded=True) as status:
                 st.write("📥 下载 RAG 文件...")
                 st.session_state.rag_loading_status = 'loading'
-
+                
                 try:
                     # 执行加载
                     success, msg = load_rag_from_github(aliyun_key)
-
+                    
                     if success:
                         status.update(label="✅ 知识库加载完成", state="complete", expanded=False)
                         st.session_state.rag_loading_status = 'complete'
@@ -1506,7 +1373,7 @@ with st.sidebar:
                         st.error(msg)
                         st.info("💡 您可以在 Tab3 手动上传 RAG 文件")
                         st.session_state.rag_loading_status = 'failed'
-
+                        
                         # 添加重试按钮
                         if st.button("🔄 重试加载", type="secondary"):
                             st.session_state.rag_loading_status = 'pending'
@@ -1515,33 +1382,33 @@ with st.sidebar:
                     status.update(label="❌ 加载出错", state="error", expanded=True)
                     st.error(f"加载失败: {str(e)}")
                     st.session_state.rag_loading_status = 'failed'
-
+                    
                     if st.button("🔄 重试加载", type="secondary"):
                         st.session_state.rag_loading_status = 'pending'
                         st.rerun()
-
+        
         elif loading_status == 'loading':
             st.info("🔄 正在加载知识库，请稍候...")
-
+        
         elif loading_status == 'failed':
             st.warning("⚠️ 知识库加载失败")
             if st.button("🔄 重试从 GitHub 加载", type="secondary"):
                 st.session_state.rag_loading_status = 'pending'
                 st.rerun()
-
+    
     # 更新显示的数据
     kb_count = len(st.session_state.kb[1])
     kb_files = st.session_state.get('kb_files', [])
-
+    
     st.markdown(f"知识库: **{kb_count}** 条 | 判例库: **{case_count}** 条")
     if kb_files:
         pass
     elif kb_count == 0:
-        st.caption("⚠️ 知识库为空，请上传文件或从从云端加载")
-
+        st.caption("⚠️ 知识库为空，请上传文件或从云端加载")
+    
     st.caption("快速上传仅支持.zip文件格式。")
     st.caption("少量文件上传请至\"知识库设计\"板块。")
-
+    
     if st.button("📤 导出数据"):
         import zipfile, shutil
         temp_dir = Path("./temp_export"); temp_dir.mkdir(exist_ok=True)
@@ -1564,18 +1431,19 @@ with st.sidebar:
                 with zipfile.ZipFile(zp,'r') as z: z.extractall(PATHS.DATA_DIR)
                 st.success("导入成功，请刷新"); st.rerun()
 
-
+# C. 主界面
 st.markdown('<div class="main-title">🍵 茶品六因子 AI 评分器 Pro</div>', unsafe_allow_html=True)
 st.markdown('<div class="slogan">"一片叶子落入水中，改变了水的味道..."</div>', unsafe_allow_html=True)
+st.markdown('<p style="text-align:center; color:#888; font-size:0.95em;">推理服务开放时间：9:00~20:00</p>', unsafe_allow_html=True)
 
-tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["💡 交互评分", "🚀 批量评分", "📕 知识库设计", "🛠️ 判例库与微调", "📲 提示词（Prompt）配置","测试日志"])
+tab1, tab2, tab3, tab4, tab5 = st.tabs(["💡 交互评分", "🚀 批量评分", "📕 知识库设计", "🛠️ 判例库与微调", "📲 提示词（Prompt）配置"])
 
 # --- Tab 1: 交互评分 ---
 with tab1:
     st.info("将参考知识库与判例库进行评分。确认结果可一键更新判例库。")
     c1, c2, c3, c4, c5 = st.columns([1, 3, 1, 3, 1])
     r_num = c2.number_input("参考知识库条目数量", 1, 20, 3, key="r1")
-    c_num = c4.number_input("参考判例库条目数量", 0, 20, 2, key="c1")
+    c_num = c4.number_input("参考判例库条目数量", 1, 20, 2, key="c1")
     
     if 'current_user_input' not in st.session_state: st.session_state.current_user_input = ""
     user_input = st.text_area("请输入茶评描述:", value=st.session_state.current_user_input, height=150, key="ui")
@@ -1585,276 +1453,264 @@ with tab1:
         st.session_state.last_scores = None
         st.session_state.last_master_comment = ""
     
+    # >>> 变更1：初始化用于存储发送给LLM的prompt的session_state <<<
+    if 'last_llm_sys_prompt' not in st.session_state:
+        st.session_state.last_llm_sys_prompt = ""
+    if 'last_llm_user_prompt' not in st.session_state:
+        st.session_state.last_llm_user_prompt = ""
+    
     # 用于生成动态key，确保每次新评分时校准输入框显示新内容
     if 'score_version' not in st.session_state:
         st.session_state.score_version = 0
-        
+    
     if st.button("开始评分", type="primary", use_container_width=True):
-        if not user_input:
-            st.warning("请输入内容")
+        if not user_input: st.warning("请输入内容")
         else:
-            with st.spinner(f"正在使用 {model_id} 品鉴."):
+            with st.spinner(f"正在使用 {model_id} 品鉴..."):
                 user_input = llm_normalize_user_input(user_input, client_d)
-                scores, kb_h, case_h = run_scoring(user_input, st.session_state.kb, st.session_state.cases, st.session_state.prompt_config, embedder, client, "Qwen3-14B", r_num, c_num)
-                st.session_state.current_user_input = user_input
-    
-                scores, kb_h, case_h = run_scoring(
-                    user_input,
-                    st.session_state.kb,
-                    st.session_state.cases,
-                    st.session_state.prompt_config,
-                    embedder,
-                    client,
-                    "Qwen3-14B",
-                    r_num,
-                    c_num
+                # >>> 变更1：接收返回的 sys_p 和 user_p <<<
+                scores, kb_h, case_h, sent_sys_p, sent_user_p = run_scoring(
+                    user_input, st.session_state.kb, st.session_state.cases,
+                    st.session_state.prompt_config, embedder, client, "Qwen3-14B", r_num, c_num
                 )
-    
-                # ✅ 只在这里保存：此时 case_h 一定已定义
-                st.session_state.last_case_hits = case_h or []
-                st.session_state.last_kb_hits = kb_h or []
-    
                 if scores:
                     st.session_state.last_scores = scores
                     st.session_state.last_master_comment = scores.get("master_comment", "")
+                    # >>> 变更1：保存发送给LLM的prompt到session_state <<<
+                    st.session_state.last_llm_sys_prompt = sent_sys_p
+                    st.session_state.last_llm_user_prompt = sent_user_p
+                    
+                    # 递增版本号，使校准输入框使用新的key，从而显示新的默认值
                     st.session_state.score_version += 1
                     st.rerun()
-
-
-        if st.session_state.last_scores:
-            s = st.session_state.last_scores["scores"]
-            mc = st.session_state.last_master_comment
-            st.markdown(f'<div class="master-comment"><b>👵 宗师总评：</b><br>{mc}</div>', unsafe_allow_html=True)
-            
-
-    s = (st.session_state.last_scores or {}).get("scores", {}) or {}
-    mc = st.session_state.get("last_master_comment", "")
-    factors = ["优雅性", "辨识度", "协调性", "饱和度", "持久性", "苦涩度"]
-    left_col, right_col = st.columns([35, 65]) 
-    with left_col:
-        st.subheader("📊 风味形态")
-        fig = plot_flavor_shape(st.session_state.get("last_scores"))
-        if fig is not None:
-            st.pyplot(fig, use_container_width=True)
-        else:
-            st.info("暂无评分结果，无法绘制风味形态图。")
-
-    with right_col:
-        cols = st.columns(2)
-        factors = ["优雅性", "辨识度", "协调性", "饱和度", "持久性", "苦涩度"]
-        for i, f in enumerate(factors):
-            if f in s:
-                d = s[f]
-                with cols[i%2]:
-                    st.markdown(f"""<div class="factor-card"><div class="score-header"><span>{f}</span><span>{d['score']}/9</span></div><div>{d['comment']}</div><div class="advice-tag">💡 {d.get('suggestion','')}</div></div>""", unsafe_allow_html=True)
     
-    st.subheader("🛠️ 评分校准与修正")
-    v = st.session_state.score_version  # 获取当前版本号
-    mc = st.session_state.get("last_master_comment", "")
-    cal_master = st.text_area("校准总评", mc, key=f"cal_master_{v}")
-    cal_scores = {}
-    st.write("分项调整")
-    active_factors = [f for f in factors if f in s]
-    grid_cols = st.columns(3) 
-    for i, f in enumerate(active_factors):
-        with grid_cols[i % 3]:
-            with st.container(border=True):
-                t_col, s_col = st.columns([1, 1])
-                with t_col:
-                    st.markdown(f"<div style='padding-top: 5px;'><b>📌 {f}</b></div>", unsafe_allow_html=True)
-                with s_col:
-                    new_score = st.number_input("分数", 0, 9, int(s[f]['score']), 1, key=f"s_{f}_{v}", label_visibility="collapsed")
-                cal_scores[f] = {
-                    "score": new_score,
-                    "comment": st.text_area(f"评语", s[f]['comment'], key=f"c_{f}_{v}", height=80, placeholder="评语"),
-                    "suggestion": st.text_area(f"建议", s[f].get('suggestion',''), key=f"sg_{f}_{v}", height=68, placeholder="建议")
-                }
-    if st.button("💾 保存校准评分", type="primary"):
-        # A. 构造专家数据包
-        expert_package = {"scores": cal_scores, "master_comment": cal_master}
-        # B. 构造 AI 数据包 (确保 st.session_state.last_scores 存在)
-        ai_package = st.session_state.last_scores
-
-        with st.spinner("同步数据到云端记忆模块..."):
-
-            
-            # 2. 存入评测日志 (新增逻辑：LLM-as-a-judge 的原料)
-            EvaluationLogger.log_evaluation(
-                text= st.session_state.get("current_user_input", user_input), 
-                model_output=ai_package, 
-                expert_output=expert_package
-            )
+    if st.session_state.last_scores:
+        s = st.session_state.last_scores["scores"]
+        mc = st.session_state.last_master_comment
+        st.markdown(f'<div class="master-comment"><b>👵 宗师总评：</b><br>{mc}</div>', unsafe_allow_html=True)
         
-        st.success("校准已存入判例库，误差数据已归档！")
-        time.sleep(1)
-        st.rerun()
+        left_col, right_col = st.columns([35, 65]) 
+        with left_col:
+            st.subheader("📊 风味形态")
+            st.pyplot(plot_flavor_shape(st.session_state.last_scores), use_container_width=True)
+        with right_col:
+            cols = st.columns(2)
+            factors = ["优雅性", "辨识度", "协调性", "饱和度", "持久性", "苦涩度"]
+            for i, f in enumerate(factors):
+                if f in s:
+                    d = s[f]
+                    with cols[i%2]:
+                        st.markdown(f"""<div class="factor-card"><div class="score-header"><span>{f}</span><span>{d['score']}/9</span></div><div>{d['comment']}</div><div class="advice-tag">💡 {d.get('suggestion','')}</div></div>""", unsafe_allow_html=True)
+        
+        # >>> 变更1：展示发送给LLM的Prompt <<<
+        with st.expander("📝 查看发送给LLM的完整Prompt", expanded=False):
+            st.markdown("**🔧 System Prompt（系统提示词）：**")
+            st.code(st.session_state.last_llm_sys_prompt, language=None)
+            st.markdown("**💬 User Prompt（用户提示词）：**")
+            st.code(st.session_state.last_llm_user_prompt, language=None)
+        
+        st.subheader("🛠️ 评分校准与修正")
+        v = st.session_state.score_version  # 获取当前版本号
+        cal_master = st.text_area("校准总评", mc, key=f"cal_master_{v}")
+        cal_scores = {}
+        st.write("分项调整")
+        active_factors = [f for f in factors if f in s]
+        grid_cols = st.columns(3) 
+        for i, f in enumerate(active_factors):
+            with grid_cols[i % 3]:
+                with st.container(border=True):
+                    t_col, s_col = st.columns([1, 1])
+                    with t_col:
+                        st.markdown(f"<div style='padding-top: 5px;'><b>📌 {f}</b></div>", unsafe_allow_html=True)
+                    with s_col:
+                        new_score = st.number_input("分数", 0, 9, int(s[f]['score']), 1, key=f"s_{f}_{v}", label_visibility="collapsed")
+                    cal_scores[f] = {
+                        "score": new_score,
+                        "comment": st.text_area(f"评语", s[f]['comment'], key=f"c_{f}_{v}", height=80, placeholder="评语"),
+                        "suggestion": st.text_area(f"建议", s[f].get('suggestion',''), key=f"sg_{f}_{v}", height=68, placeholder="建议")
+                    }
+        
+        if st.button("💾 保存校准评分", type="primary"):
+            nc = {"text": user_input, "scores": cal_scores, "tags": "交互-校准", "master_comment": cal_master, "created_at": time.strftime("%Y-%m-%d")}
+            st.session_state.cases[1].append(nc)
+            st.session_state.cases[0].add(embedder.encode([user_input]))
+            ResourceManager.save(st.session_state.cases[0], st.session_state.cases[1], PATHS.case_index, PATHS.case_data, is_json=True)
+       
+            with st.spinner("同步判例到GitHub..."):
+                GithubSync.sync_cases(st.session_state.cases[1])
+            
+            st.success("校准已保存并同步"); st.rerun()
 
 # --- Tab 2: 批量评分 ---
 with tab2:
     f = st.file_uploader("上传文件 (.txt/.docx)")
     c1, c2, c3, c4, c5 = st.columns([1, 3, 1, 3, 1])
     r_n = c2.number_input("参考知识库条目数量", 1, 20, 3, key="rb")
-    c_n = c4.number_input("参考判例库条目数量", 0, 20, 2, key="cb")
+    c_n = c4.number_input("参考判例库条目数量", 1, 20, 2, key="cb")
     if f and st.button("批量处理"):
         lines = [l.strip() for l in parse_file(f).split('\n') if len(l)>10]
         res, bar = [], st.progress(0)
         for i, l in enumerate(lines):
             l = llm_normalize_user_input(l, client_d)
-            s, _, _ = run_scoring(l, st.session_state.kb, st.session_state.cases, st.session_state.prompt_config, embedder, client, "Qwen3-14B", r_n, c_n)
+            # run_scoring 现在返回5个值，批量模式忽略后两个prompt
+            s, _, _, _, _ = run_scoring(l, st.session_state.kb, st.session_state.cases, st.session_state.prompt_config, embedder, client, "Qwen3-14B", r_n, c_n)
             res.append({"id":i+1, "text":l, "scores":s})
             bar.progress((i+1)/len(lines))
         st.success("完成")
         st.download_button("下载Word", create_word_report(res), "report.docx")
-    
+
 # --- Tab 3: RAG ---
+# >>> 变更2：移除Column 2，将"从云端加载知识库"合并到操作流程中（添加/删除后自动重建） <<<
 with tab3:
     st.subheader("📚 知识库 (RAG)")
-    st.caption("上传PDF/文档以增强模型回答的准确性。文件将同步到云端。")
-    colu1, colu2 = st.columns([7,3])
-    with colu1:
-        # ===== 显示GitHub上的RAG文件列表 =====
-        st.markdown("**📁 云端上的RAG文件：**")
-        
-        # 获取GitHub上的文件列表
-        if 'github_rag_files' not in st.session_state:
-            st.session_state.github_rag_files = []
-        
-        col_refresh, col_spacer = st.columns([1, 3])
-        with col_refresh:
-            if st.button("🔄 刷新列表", key="refresh_rag_list"):
-                with st.spinner("正在获取文件列表..."):
-                    st.session_state.github_rag_files = GithubSync.list_rag_files()
-                st.rerun()
-        
-        github_files = st.session_state.github_rag_files
-        if not github_files:
-            # 首次加载时尝试获取
-            github_files = GithubSync.list_rag_files()
-            st.session_state.github_rag_files = github_files
-        
-        if github_files:
-            st.info(f"共 {len(github_files)} 个文件")
-            
-            # 用于追踪需要删除的文件
-            if 'rag_files_to_delete' not in st.session_state:
-                st.session_state.rag_files_to_delete = set()
-            
-            # 显示文件列表，每个文件带删除按钮
-            for fname in github_files:
-                file_col, del_col = st.columns([5, 1])
-                with file_col:
-                    if fname in st.session_state.rag_files_to_delete:
-                        st.markdown(f"~~📄 {fname}~~ *(待删除)*")
-                    else:
-                        st.markdown(f"📄 {fname}")
-                with del_col:
-                    if fname not in st.session_state.rag_files_to_delete:
-                        if st.button("🗑️", key=f"del_rag_{fname}", help=f"删除 {fname}"):
-                            st.session_state.rag_files_to_delete.add(fname)
-                            st.rerun()
-                    else:
-                        if st.button("↩️", key=f"undo_rag_{fname}", help="撤销删除"):
-                            st.session_state.rag_files_to_delete.discard(fname)
-                            st.rerun()
-            
-            # 如果有待删除的文件，显示确认按钮
-            if st.session_state.rag_files_to_delete:
-                st.warning(f"⚠️ 将删除 {len(st.session_state.rag_files_to_delete)} 个文件")
-                del_col1, del_col2 = st.columns(2)
-                with del_col1:
-                    if st.button("✅ 确认删除", type="primary", key="confirm_del_rag"):
-                        with st.spinner("正在删除文件..."):
-                            deleted = []
-                            for fname in st.session_state.rag_files_to_delete:
-                                if GithubSync.delete_rag_file(fname):
-                                    deleted.append(fname)
-                            
-                            # 更新session state
-                            st.session_state.github_rag_files = [f for f in github_files if f not in deleted]
-                            
-                            # 更新本地知识库文件列表
-                            current_kb_files = st.session_state.get('kb_files', [])
-                            st.session_state.kb_files = [f for f in current_kb_files if f not in deleted]
-                            ResourceManager.save_kb_files(st.session_state.kb_files)
-                            
-                            st.session_state.rag_files_to_delete = set()
-                            st.success(f"✅ 已删除 {len(deleted)} 个文件")
-                            
-                            # 提示需要重建知识库
-                            st.info("💡 文件已从云端删除。如需更新本地知识库，请点击下方的'重建本地知识库'按钮。")
-                            time.sleep(1)
-                            st.rerun()
-                with del_col2:
-                    if st.button("❌ 取消", key="cancel_del_rag"):
-                        st.session_state.rag_files_to_delete = set()
-                        st.rerun()
-        else:
-            st.caption("暂无RAG文件")
-        
-        st.markdown("---")
-        
-        # ===== 上传新文件（添加模式） =====
-        st.markdown("**➕ 添加新文件：**")
-        up = st.file_uploader("选择文件", accept_multiple_files=True, key="kb_uploader", 
-                            type=['pdf', 'txt', 'docx'])
-        
-        if up and st.button("📤 添加到知识库", type="primary"):
-            # 检查是否有重名文件
-            new_names = [u.name for u in up]
-            existing_names = st.session_state.get('github_rag_files', [])
-            duplicate_names = set(new_names) & set(existing_names)
-            
-            if duplicate_names:
-                st.warning(f"⚠️ 以下文件已存在，将被覆盖：{', '.join(duplicate_names)}")
-            
-            with st.spinner("正在处理文件..."):
-                # 1. 解析文件内容
-                raw = "".join([parse_file(u) for u in up])
-                
-                if not raw.strip():
-                    st.error("❌ 无法从上传的文件中提取有效文本")
-                else:
-                    # 2. 上传到GitHub
-                    with st.spinner("上传到GitHub..."):
-                        success, uploaded_names = GithubSync.add_rag_files(up, "tea_data/RAG")
-                    
-                    if success:
-                        # 3. 更新本地文件列表
-                        current_kb_files = st.session_state.get('kb_files', [])
-                        # 合并文件列表（去重）
-                        all_files = list(set(current_kb_files + uploaded_names))
-                        st.session_state.kb_files = all_files
-                        st.session_state.github_rag_files = list(set(existing_names + uploaded_names))
-                        ResourceManager.save_kb_files(all_files)
-                        
-                        st.success(f"✅ 已上传 {len(uploaded_names)} 个文件到GitHub")
-                        st.info("💡 请点击下方的'重建本地知识库'按钮以更新向量索引。")
-                        time.sleep(1)
-                        st.rerun()
-                    else:
-                        st.error("❌ 上传到GitHub失败")
+    st.caption("上传PDF/文档以增强模型回答的准确性。文件将同步到云端。添加或删除文件后，系统将自动从云端重建本地知识库。")
 
-# ===== 重建本地知识库按钮 =====
-with colu2:
-    st.markdown("**🔧 知识库维护：**")
-    local_kb_count = len(st.session_state.kb[1])
-    st.caption(f"网页端知识库：{local_kb_count} 个片段")
+    # ===== 显示GitHub上的RAG文件列表 =====
+    st.markdown("**📁 云端上的RAG文件：**")
     
-    # 每个文件换行显示
-    if kb_files:
-        st.markdown("**网页端知识库文件:**")
-        for fname in kb_files:
-            st.markdown(f"- 📄 {fname}")
+    # 获取GitHub上的文件列表
+    if 'github_rag_files' not in st.session_state:
+        st.session_state.github_rag_files = []
+    
+    col_refresh, col_spacer = st.columns([1, 3])
+    with col_refresh:
+        if st.button("🔄 刷新列表", key="refresh_rag_list"):
+            with st.spinner("正在获取文件列表..."):
+                st.session_state.github_rag_files = GithubSync.list_rag_files()
+            st.rerun()
+    
+    github_files = st.session_state.github_rag_files
+    if not github_files:
+        # 首次加载时尝试获取
+        github_files = GithubSync.list_rag_files()
+        st.session_state.github_rag_files = github_files
+    
+    if github_files:
+        st.info(f"共 {len(github_files)} 个文件")
+        
+        # 用于追踪需要删除的文件
+        if 'rag_files_to_delete' not in st.session_state:
+            st.session_state.rag_files_to_delete = set()
+        
+        # 显示文件列表，每个文件带删除按钮
+        for fname in github_files:
+            file_col, del_col = st.columns([5, 1])
+            with file_col:
+                if fname in st.session_state.rag_files_to_delete:
+                    st.markdown(f"~~📄 {fname}~~ *(待删除)*")
+                else:
+                    st.markdown(f"📄 {fname}")
+            with del_col:
+                if fname not in st.session_state.rag_files_to_delete:
+                    if st.button("🗑️", key=f"del_rag_{fname}", help=f"删除 {fname}"):
+                        st.session_state.rag_files_to_delete.add(fname)
+                        st.rerun()
+                else:
+                    if st.button("↩️", key=f"undo_rag_{fname}", help="撤销删除"):
+                        st.session_state.rag_files_to_delete.discard(fname)
+                        st.rerun()
+        
+        # 如果有待删除的文件，显示确认按钮
+        if st.session_state.rag_files_to_delete:
+            st.warning(f"⚠️ 将删除 {len(st.session_state.rag_files_to_delete)} 个文件")
+            del_col1, del_col2 = st.columns(2)
+            with del_col1:
+                if st.button("✅ 确认删除并同步知识库", type="primary", key="confirm_del_rag"):
+                    with st.spinner("正在删除文件..."):
+                        deleted = []
+                        for fname in st.session_state.rag_files_to_delete:
+                            if GithubSync.delete_rag_file(fname):
+                                deleted.append(fname)
+                        
+                        # 更新session state
+                        st.session_state.github_rag_files = [f for f in github_files if f not in deleted]
+                        
+                        # 更新本地知识库文件列表
+                        current_kb_files = st.session_state.get('kb_files', [])
+                        st.session_state.kb_files = [f for f in current_kb_files if f not in deleted]
+                        ResourceManager.save_kb_files(st.session_state.kb_files)
+                        
+                        st.session_state.rag_files_to_delete = set()
+                        st.success(f"✅ 已删除 {len(deleted)} 个文件")
+                    
+                    # >>> 变更2：删除后自动从云端重建知识库 <<<
+                    with st.spinner("🔄 正在从云端重建本地知识库..."):
+                        success, msg = load_rag_from_github(aliyun_key)
+                        if success:
+                            st.success(msg)
+                            st.session_state.github_rag_files = GithubSync.list_rag_files()
+                        else:
+                            st.warning(f"知识库重建失败: {msg}")
+                    time.sleep(1)
+                    st.rerun()
+            with del_col2:
+                if st.button("❌ 取消", key="cancel_del_rag"):
+                    st.session_state.rag_files_to_delete = set()
+                    st.rerun()
     else:
-        st.markdown("**网页端知识库文件:** 无") 
+        st.caption("暂无RAG文件")
+    
     st.markdown("---")
-    st.markdown("云端数据与网页数据不统一？")
-    if st.button("🔄 从云端加载知识库", use_container_width=True, type="primary"):
+    
+    # ===== 上传新文件（添加模式） =====
+    st.markdown("**➕ 添加新文件：**")
+    up = st.file_uploader("选择文件", accept_multiple_files=True, key="kb_uploader", 
+                        type=['pdf', 'txt', 'docx'])
+    
+    if up and st.button("📤 添加到知识库并同步", type="primary"):
+        # 检查是否有重名文件
+        new_names = [u.name for u in up]
+        existing_names = st.session_state.get('github_rag_files', [])
+        duplicate_names = set(new_names) & set(existing_names)
+        
+        if duplicate_names:
+            st.warning(f"⚠️ 以下文件已存在，将被覆盖：{', '.join(duplicate_names)}")
+        
+        with st.spinner("正在处理文件..."):
+            # 1. 解析文件内容（仅做验证，确保文件可解析）
+            raw = "".join([parse_file(u) for u in up])
+            
+            if not raw.strip():
+                st.error("❌ 无法从上传的文件中提取有效文本")
+            else:
+                # 2. 上传到GitHub（包含tea_data/RAG和tea_backup的备份）
+                with st.spinner("上传到GitHub..."):
+                    success, uploaded_names = GithubSync.add_rag_files(up, "tea_data/RAG")
+                
+                if success:
+                    # 3. 更新本地文件列表
+                    current_kb_files = st.session_state.get('kb_files', [])
+                    # 合并文件列表（去重）
+                    all_files = list(set(current_kb_files + uploaded_names))
+                    st.session_state.kb_files = all_files
+                    st.session_state.github_rag_files = list(set(existing_names + uploaded_names))
+                    ResourceManager.save_kb_files(all_files)
+                    
+                    st.success(f"✅ 已上传 {len(uploaded_names)} 个文件到GitHub")
+                    
+                    # >>> 变更2：上传后自动从云端重建知识库 <<<
+                    with st.spinner("🔄 正在从云端重建本地知识库..."):
+                        rebuild_success, rebuild_msg = load_rag_from_github(aliyun_key)
+                        if rebuild_success:
+                            st.success(rebuild_msg)
+                            st.session_state.github_rag_files = GithubSync.list_rag_files()
+                        else:
+                            st.warning(f"知识库重建失败: {rebuild_msg}")
+                    time.sleep(1)
+                    st.rerun()
+                else:
+                    st.error("❌ 上传到GitHub失败")
+    
+    st.markdown("---")
+    
+    # ===== 手动重建按钮（兜底） =====
+    st.markdown("**🔧 手动维护：**")
+    st.caption("如果自动重建未生效，可以手动触发从云端重建知识库。")
+    if st.button("🔄 手动从云端重建知识库", key="manual_rebuild_kb"):
         with st.spinner("正在从云端拉取并重建知识库..."):
             success, msg = load_rag_from_github(aliyun_key)
             if success:
                 st.success(msg)
-                # 更新GitHub文件列表
                 st.session_state.github_rag_files = GithubSync.list_rag_files()
             else:
                 st.error(msg)
@@ -1862,9 +1718,8 @@ with colu2:
         st.rerun()
 
 
-
 with tab4:
-
+    MANAGER_URL = "http://117.50.138.123:8001"
     c1, c2 = st.columns([5, 5])
     
     with c1:
@@ -1894,8 +1749,7 @@ with tab4:
                 if st.form_submit_button("保存判例并同步"):
                     new_c = {"text": f_txt, "tags": f_tag, "scores": input_scores, "created_at": time.strftime("%Y-%m-%d")}
                     st.session_state.cases[1].append(new_c)
-                    vec = embedder.encode([f_txt]).astype("float32")
-                    faiss.normalize_L2(vec)
+                    vec = embedder.encode([f_txt])
                     st.session_state.cases[0].add(vec)
                     ResourceManager.save(st.session_state.cases[0], st.session_state.cases[1], PATHS.case_index, PATHS.case_data, is_json=True)
                     
@@ -1905,79 +1759,89 @@ with tab4:
                     
                     st.success("已保存并同步！")
                     time.sleep(1); st.rerun()
-    
+
     # --- 右侧：微调控制 ---
-with c2:
-    st.subheader("🚀 模型微调 (LoRA)")
-    
-    server_status = "unknown"
-    try:
-        resp = requests.get(f"{"http://117.50.138.123:8001"}/status", timeout=2)
-        if resp.status_code == 200:
-            status_data = resp.json()
-            if status_data.get("vllm_status") == "running":
-                server_status = "idle"
-            else:
-                server_status = "training"
-        else:
-            server_status = "error"
-    except:
-        server_status = "offline"
-    
-    if server_status == "idle":
-        st.success("🟢 服务器就绪 (正在进行推理服务)")
-    elif server_status == "training":
-        st.warning("🟠 正在微调训练中... (推理服务暂停)")
-        st.markdown("⚠️ **注意：** 此时无法进行评分交互，请耐心等待训练完成。")
-    elif server_status == "offline":
-        st.error("🔴 无法连接到 GPU 服务器 (请联系管理员)")
-
-    st.markdown("#### 1. 数据准备")
-    
-    if PATHS.training_file.exists():
-        with open(PATHS.training_file, "r", encoding="utf-8") as f:
-            lines = f.readlines()
-        data_count = len(lines)
-    else:
-        data_count = 0
+    with c2:
+        st.subheader("🚀 模型微调 (LoRA)")
         
-    st.info(f"当前微调数据：**{data_count} 条** | 判例库：**{len(st.session_state.cases[1])} 条**")
-    
-    # ===== 修改：覆盖逻辑 =====
-    if st.button("🔄 将当前所有判例转为微调数据（覆盖）"):
-        cnt = ResourceManager.overwrite_finetune(
-            st.session_state.cases[1],
-            st.session_state.prompt_config.get('system_template',''), 
-            st.session_state.prompt_config.get('user_template','')
-        )
-        st.success(f"已覆盖写入 {cnt} 条微调数据！")
-        time.sleep(1); st.rerun()
-
-    st.markdown("#### 2. 启动训练")
-    st.caption("点击下方按钮将把数据上传至 GPU 服务器并开始训练。训练期间服务将中断约 2-5 分钟。")
-
-    btn_disabled = (server_status != "idle") or (data_count == 0)
-    
-    if st.button("🔥 开始微调 (Start LoRA)", type="primary", disabled=btn_disabled):
-        if not PATHS.training_file.exists():
-            st.error("找不到训练数据文件！")
+        admin_pwd = st.text_input("🔒 请输入管理员密码以解锁微调功能", type="password", key="admin_pwd_tab4")
+        
+        if admin_pwd != "tea_agent_2026":
+            if admin_pwd:
+                st.error("❌ 密码错误，请重试。")
+            else:
+                st.info("🔐 输入管理员密码后解锁微调功能。")
         else:
+            st.success("✅ 已解锁微调功能")
+            
+            server_status = "unknown"
             try:
-                with open(PATHS.training_file, "rb") as f:
-                    with st.spinner("正在上传数据并启动训练任务..."):
-                        files = {'file': ('tea_feedback.jsonl', f, 'application/json')}
-                        r = requests.post(f"{"http://117.50.138.123:8001"}/upload_and_train", files=files, timeout=100)
-                        
-                    if r.status_code == 200:
-                        st.balloons()
-                        st.success(f"✅ 任务已提交！服务器响应: {r.json().get('message')}")
-                        st.info("💡 你可以稍后刷新页面查看状态，训练完成后服务会自动恢复。")
+                resp = requests.get(f"{MANAGER_URL}/status", timeout=2)
+                if resp.status_code == 200:
+                    status_data = resp.json()
+                    if status_data.get("vllm_status") == "running":
+                        server_status = "idle"
                     else:
-                        st.error(f"❌ 提交失败: {r.text}")
-            except Exception as e:
-                st.error(f"❌ 连接错误: {e}")
+                        server_status = "training"
+                else:
+                    server_status = "error"
+            except:
+                server_status = "offline"
+            
+            if server_status == "idle":
+                st.success("🟢 服务器就绪 (正在进行推理服务)")
+            elif server_status == "training":
+                st.warning("🟠 正在微调训练中... (推理服务暂停)")
+                st.markdown("⚠️ **注意：** 此时无法进行评分交互，请耐心等待训练完成。")
+            elif server_status == "offline":
+                st.error("🔴 无法连接到 GPU 服务器 (请联系管理员)")
 
-# --- Tab 4: Prompt配置 ---
+            st.markdown("#### 1. 数据准备")
+            
+            if PATHS.training_file.exists():
+                with open(PATHS.training_file, "r", encoding="utf-8") as f:
+                    lines = f.readlines()
+                data_count = len(lines)
+            else:
+                data_count = 0
+                
+            st.info(f"当前微调数据：**{data_count} 条** | 判例库：**{len(st.session_state.cases[1])} 条**")
+            
+            # ===== 修改：覆盖逻辑 =====
+            if st.button("🔄 将当前所有判例转为微调数据（覆盖）"):
+                cnt = ResourceManager.overwrite_finetune(
+                    st.session_state.cases[1],
+                    st.session_state.prompt_config.get('system_template',''), 
+                    st.session_state.prompt_config.get('user_template','')
+                )
+                st.success(f"已覆盖写入 {cnt} 条微调数据！")
+                time.sleep(1); st.rerun()
+
+            st.markdown("#### 2. 启动训练")
+            st.caption("点击下方按钮将把数据上传至 GPU 服务器并开始训练。训练期间服务将中断约 2-5 分钟。")
+
+            btn_disabled = (server_status != "idle") or (data_count == 0)
+            
+            if st.button("🔥 开始微调 (Start LoRA)", type="primary", disabled=btn_disabled):
+                if not PATHS.training_file.exists():
+                    st.error("找不到训练数据文件！")
+                else:
+                    try:
+                        with open(PATHS.training_file, "rb") as f:
+                            with st.spinner("正在上传数据并启动训练任务..."):
+                                files = {'file': ('tea_feedback.jsonl', f, 'application/json')}
+                                r = requests.post(f"{MANAGER_URL}/upload_and_train", files=files, timeout=100)
+                                
+                            if r.status_code == 200:
+                                st.balloons()
+                                st.success(f"✅ 任务已提交！服务器响应: {r.json().get('message')}")
+                                st.info("💡 你可以稍后刷新页面查看状态，训练完成后服务会自动恢复。")
+                            else:
+                                st.error(f"❌ 提交失败: {r.text}")
+                    except Exception as e:
+                        st.error(f"❌ 连接错误: {e}")
+
+# --- Tab 5: Prompt配置 ---
 with tab5:
     pc = st.session_state.prompt_config
     st.markdown("系统提示词**可以修改**。完整全面的提示词会让大语言模型返回的更准确结果。")    
@@ -2003,97 +1867,3 @@ with tab5:
                 st.session_state.prompt_config = new_cfg
                 with open(PATHS.prompt_config_file, 'w', encoding='utf-8') as f:
                     json.dump(new_cfg, f, ensure_ascii=False, indent=2)
-
-
-# --- Tab 6: 测试日志（误差分析 / MSE） ---
-with tab6:
-    st.subheader("🧪 测试日志（模型 vs 专家）")
-    st.caption("这里展示已归档的评测日志，并计算各因子的均方误差（MSE）。")
-
-    logs = EvaluationLogger.load_logs()
-    if not logs:
-        st.info("暂无日志。请先在「交互评分」里保存一次校准评分。")
-    else:
-        factors = ["优雅性", "辨识度", "协调性", "饱和度", "持久性", "苦涩度"]
-
-        def _extract_scores(pkg: dict) -> dict:
-            # pkg can be full model output or expert package
-            if not isinstance(pkg, dict):
-                return {}
-            s = pkg.get("scores", pkg.get("scores", {}))
-            # sometimes nested: {"scores": {...}}
-            if isinstance(s, dict) and "scores" in s and isinstance(s["scores"], dict):
-                s = s["scores"]
-            return s if isinstance(s, dict) else {}
-
-        def _mse(pred: dict, gt: dict) -> float:
-            se = []
-            for f in factors:
-                try:
-                    p = float(pred.get(f, {}).get("score", 0))
-                    g = float(gt.get(f, {}).get("score", 0))
-                    se.append((p - g) ** 2)
-                except Exception:
-                    continue
-            return float(np.mean(se)) if se else float("nan")
-
-        # Summary metrics
-        mses = []
-        for l in logs:
-            p = _extract_scores(l.get("model_prediction", {}))
-            g = _extract_scores(l.get("expert_ground_truth", {}))
-            mses.append(_mse(p, g))
-        valid_mses = [x for x in mses if x == x]  # filter NaN
-        if valid_mses:
-            st.metric("平均 MSE（六因子）", f"{np.mean(valid_mses):.3f}")
-        else:
-            st.warning("日志中缺少可计算的分数结构，无法统计 MSE。")
-
-        # List logs
-        for i, l in enumerate(logs[:50]):
-            with st.expander(f"#{i+1} {l.get('timestamp','')} | id={l.get('id','')}"):
-                st.markdown("**输入文本**")
-                st.write(l.get("input_text", ""))
-
-                pred_pkg = l.get("model_prediction", {})
-                gt_pkg = l.get("expert_ground_truth", {})
-
-                pred_s = _extract_scores(pred_pkg)
-                gt_s = _extract_scores(gt_pkg)
-                mse_val = _mse(pred_s, gt_s)
-
-                c1, c2 = st.columns(2)
-                with c1:
-                    st.markdown("**模型输出**")
-                    st.json(pred_pkg)
-                with c2:
-                    st.markdown("**专家校准**")
-                    st.json(gt_pkg)
-
-                st.markdown(f"**MSE（本条）**：{mse_val:.3f}" if mse_val == mse_val else "**MSE（本条）**：不可计算")
-
-                # LLM-as-judge
-                colj1, colj2 = st.columns([2, 8])
-                with colj1:
-                    if st.button("🤖 让裁判分析", key=f"judge_{l.get('id','')}", use_container_width=True):
-                        with st.spinner("裁判分析中..."):
-                            analysis = EvaluationLogger.run_judge(l.get("id", ""), client_d)
-                        st.session_state[f"judge_out_{l.get('id','')}"] = analysis
-                with colj2:
-                    if st.session_state.get(f"judge_out_{l.get('id','')}"):
-                        st.markdown("**裁判分析**")
-                        st.write(st.session_state.get(f"judge_out_{l.get('id','')}"))
-
-
-
-
-
-
-
-
-
-
-
-
-
-
