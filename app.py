@@ -20,6 +20,7 @@ import matplotlib.pyplot as plt
 from scipy.interpolate import make_interp_spline
 from graphrag_retriever import GraphRAGRetriever, GraphRAGIndexer, Chunk
 import base64
+import pdfplumber
 
 # ==========================================
 # [SECTION 0] 基础配置与路径定义
@@ -890,19 +891,12 @@ def run_scoring(text: str, kb_res: Tuple, case_res: Tuple, prompt_cfg: Dict, emb
 # [SECTION 3] 辅助与可视化
 # ==========================================
 
-def parse_file(uploaded_file) -> str:
-    """解析上传文件"""
-    try:
-        if uploaded_file.name.endswith('.txt'): return uploaded_file.read().decode("utf-8")
-        if uploaded_file.name.endswith('.pdf'): return "".join([p.extract_text() for p in PdfReader(uploaded_file).pages])
-        if uploaded_file.name.endswith('.docx'): return "\n".join([p.text for p in Document(uploaded_file).paragraphs])
-    except: return ""
-    return ""
-
 def parse_file_bytes(filename: str, content: bytes) -> str:
     """
     解析文件内容 (从 bytes) - 用于从 GitHub 拉取的文件
     支持格式: .txt, .pdf, .docx
+    
+    [修复] PDF 解析改用 pdfplumber，解决中文 CID 字体乱码问题
     """
     try:
         # 1. 处理 TXT 文件
@@ -910,84 +904,95 @@ def parse_file_bytes(filename: str, content: bytes) -> str:
             text = content.decode('utf-8', errors='ignore')
             print(f"[INFO]     → TXT 解析成功: {len(text)} 字符")
             return text
-        
-        # 2. 处理 PDF 文件
+
+        # 2. 处理 PDF 文件 —— 使用 pdfplumber（关键修改）
         elif filename.lower().endswith('.pdf'):
             try:
-                print(f"[INFO]     → 开始解析 PDF...")
+                print(f"[INFO]     → 开始解析 PDF (pdfplumber)...")
                 print(f"[INFO]     → 文件大小: {len(content):,} bytes")
-                
-                # 验证 PDF 文件头
+
                 if not content.startswith(b'%PDF'):
                     print(f"[ERROR]    → 不是有效的 PDF 文件（文件头错误）")
-                    print(f"[ERROR]    → 前20字节: {content[:20]}")
                     return ""
-                
-                # 验证 PDF 文件尾
-                if b'%%EOF' not in content[-1024:]:
-                    print(f"[WARN]     → PDF 文件尾标记缺失，文件可能不完整")
-                    print(f"[WARN]     → 后50字节: {content[-50:]}")
-                
-                # 尝试解析 PDF
-                reader = PdfReader(BytesIO(content))
-                page_count = len(reader.pages)
-                print(f"[INFO]     → PDF 共 {page_count} 页")
-                
+
                 text = ""
                 failed_pages = []
-                
-                for idx, page in enumerate(reader.pages, 1):
-                    try:
-                        page_text = page.extract_text()
-                        if page_text:
-                            text += page_text + "\n"
-                            if idx % 10 == 0:  # 每 10 页输出一次进度
+
+                with pdfplumber.open(BytesIO(content)) as pdf:
+                    page_count = len(pdf.pages)
+                    print(f"[INFO]     → PDF 共 {page_count} 页")
+
+                    for idx, page in enumerate(pdf.pages, 1):
+                        try:
+                            page_text = page.extract_text()
+                            if page_text:
+                                text += page_text + "\n"
+                            if idx % 10 == 0:
                                 print(f"[INFO]     → 已处理 {idx}/{page_count} 页")
-                    except Exception as e:
-                        failed_pages.append(idx)
-                        print(f"[WARN]     → 第 {idx} 页解析失败: {e}")
-                        continue
-                
+                        except Exception as e:
+                            failed_pages.append(idx)
+                            print(f"[WARN]     → 第 {idx} 页解析失败: {e}")
+                            continue
+
                 if failed_pages:
-                    print(f"[WARN]     → 共 {len(failed_pages)} 页解析失败: {failed_pages[:10]}{'...' if len(failed_pages) > 10 else ''}")
-                
+                    print(f"[WARN]     → 共 {len(failed_pages)} 页解析失败")
+
                 if text.strip():
-                    print(f"[INFO]     → PDF 解析完成: {len(text):,} 字符 (成功率: {(page_count-len(failed_pages))/page_count*100:.1f}%)")
+                    # ── 关键：验证是否还有乱码 ──
+                    glyph_ratio = text.count('/G') / max(len(text), 1)
+                    if glyph_ratio > 0.01:  # 超过1%的内容是 /Gxx 格式，说明仍有问题
+                        print(f"[WARN]     → 检测到疑似 glyph 乱码 (比例: {glyph_ratio:.2%})")
+                        print(f"[WARN]     → 前200字符预览: {text[:200]}")
+                    else:
+                        print(f"[INFO]     → PDF 解析完成: {len(text):,} 字符 ✅")
+                        print(f"[INFO]     → 前100字符预览: {text[:100]}")
                     return text
                 else:
                     print(f"[WARN]     → PDF 解析结果为空")
                     return ""
-                    
+
             except Exception as e:
-                print(f"[ERROR]    ✗ PDF 解析失败: {type(e).__name__}: {e}")
-                
-                # 如果是 EOF 错误，提供更多诊断信息
-                if "EOF" in str(e) or "PdfReadError" in str(type(e).__name__):
-                    print(f"[ERROR]    → 这通常意味着 PDF 文件下载不完整或损坏")
-                    print(f"[ERROR]    → 文件大小: {len(content):,} bytes")
-                    print(f"[ERROR]    → 文件头: {content[:20]}")
-                    print(f"[ERROR]    → 文件尾: {content[-50:] if len(content) > 50 else content}")
-                
+                print(f"[ERROR]    ✗ PDF (pdfplumber) 解析失败: {type(e).__name__}: {e}")
                 import traceback
                 traceback.print_exc()
                 return ""
-        
+
         # 3. 处理 DOCX 文件
         elif filename.lower().endswith('.docx'):
             doc = Document(BytesIO(content))
             text = "\n".join([p.text for p in doc.paragraphs if p.text.strip()])
             print(f"[INFO]     → DOCX 解析成功: {len(text)} 字符")
             return text
-        
+
         else:
             print(f"[WARN]     → 不支持的文件格式: {filename}")
             return ""
-            
+
     except Exception as e:
         print(f"[ERROR]    ✗ 解析 {filename} 失败: {e}")
         import traceback
         traceback.print_exc()
         return ""
+    
+def parse_file(uploaded_file) -> str:
+    """解析上传文件（Streamlit UploadedFile 对象）"""
+    try:
+        if uploaded_file.name.endswith('.txt'):
+            return uploaded_file.read().decode("utf-8")
+        if uploaded_file.name.endswith('.pdf'):
+            # [修复] 使用 pdfplumber 替代 PyPDF2
+            with pdfplumber.open(uploaded_file) as pdf:
+                return "\n".join([
+                    page.extract_text() or ""
+                    for page in pdf.pages
+                ])
+        if uploaded_file.name.endswith('.docx'):
+            return "\n".join([p.text for p in Document(uploaded_file).paragraphs])
+    except Exception as e:
+        print(f"[ERROR] parse_file 失败: {e}")
+        return ""
+    return ""
+
 
 def create_word_report(results: List[Dict]) -> BytesIO:
     """生成Word报告"""
