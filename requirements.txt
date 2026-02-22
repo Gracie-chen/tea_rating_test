@@ -12,6 +12,5 @@ matplotlib
 scipy
 sentence_transformers
 PyGithub
-base64
 
 
