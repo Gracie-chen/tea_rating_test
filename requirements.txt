@@ -14,5 +14,6 @@ sentence_transformers
 PyGithub
 networkx
 pdfplumber
-
-
+pymupdf
+pytesseract
+Pillow
