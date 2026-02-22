@@ -12,5 +12,6 @@ matplotlib
 scipy
 sentence_transformers
 PyGithub
+networkx
 
 
