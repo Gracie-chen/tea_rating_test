@@ -1,0 +1,8 @@
+{"head": "ｃ\n）\n/G70 /G2F /G37 /G71 /G72 /G2F", "relation": "关联", "tail": "５．３．２．３\n/G70 /G2F\n（\n/G73 /G2F\n）\n/G74\n５．３．２．４\n/G71 /G72 /G2F", "chunk_id": "2"}
+{"head": "５．３．２．３\n/G70 /G2F\n（\n/G73 /G2F\n）\n/G74\n５．３．２．４\n/G71 /G72 /G2F", "relation": "关联", "tail": "/G75\n２\n/G76 /G77 /G50 /G51 /G2F /G51 /G78 /G33 /G34 /G79 /G7A", "chunk_id": "2"}
+{"head": "２５％\n、\n１０％\n、\n２５％\n、\n３０％\n、\n１０％", "relation": "关联", "tail": "２０％\n、\n１０％\n、\n３０％\n、\n３５％\n、\n５％", "chunk_id": "3"}
+{"head": "２０％\n、\n１０％\n、\n３０％\n、\n３５％\n、\n５％", "relation": "关联", "tail": "/G89 /G8A /G8B /G2F", "chunk_id": "3"}
+{"head": "/G89 /G8A /G8B /G2F", "relation": "关联", "tail": "/G8C /G8D\n（\n/G8E /G8F\n）\n/G8B /G2F", "chunk_id": "3"}
+{"head": "/G8C /G8D\n（\n/G8E /G8F\n）\n/G8B /G2F", "relation": "关联", "tail": "/G8B /G2F", "chunk_id": "3"}
+{"head": "/G34 /G2F /G9D", "relation": "关联", "tail": "/G4E\n/G51\n/GCA\n/GAC /GBE /G9D\n/GC8 /GC9 /GC3 /GCB", "chunk_id": "18"}
+{"head": "/GE5\n/G24\n/G79 /G7A", "relation": "关联", "tail": "/G2C /G2D", "chunk_id": "23"}
