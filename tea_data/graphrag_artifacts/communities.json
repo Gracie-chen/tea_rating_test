@@ -1,0 +1,50 @@
+[
+  {
+    "community_id": "c0",
+    "nodes": [
+      "/G89 /G8A /G8B /G2F",
+      "/G8B /G2F",
+      "/G8C /G8D\n（\n/G8E /G8F\n）\n/G8B /G2F",
+      "２０％\n、\n１０％\n、\n３０％\n、\n３５％\n、\n５％",
+      "２５％\n、\n１０％\n、\n２５％\n、\n３０％\n、\n１０％"
+    ],
+    "chunk_ids": [
+      "3"
+    ],
+    "summary": ""
+  },
+  {
+    "community_id": "c1",
+    "nodes": [
+      "/G75\n２\n/G76 /G77 /G50 /G51 /G2F /G51 /G78 /G33 /G34 /G79 /G7A",
+      "５．３．２．３\n/G70 /G2F\n（\n/G73 /G2F\n）\n/G74\n５．３．２．４\n/G71 /G72 /G2F",
+      "ｃ\n）\n/G70 /G2F /G37 /G71 /G72 /G2F"
+    ],
+    "chunk_ids": [
+      "2"
+    ],
+    "summary": ""
+  },
+  {
+    "community_id": "c2",
+    "nodes": [
+      "/G34 /G2F /G9D",
+      "/G4E\n/G51\n/GCA\n/GAC /GBE /G9D\n/GC8 /GC9 /GC3 /GCB"
+    ],
+    "chunk_ids": [
+      "18"
+    ],
+    "summary": ""
+  },
+  {
+    "community_id": "c3",
+    "nodes": [
+      "/G2C /G2D",
+      "/GE5\n/G24\n/G79 /G7A"
+    ],
+    "chunk_ids": [
+      "23"
+    ],
+    "summary": ""
+  }
+]
