@@ -13,5 +13,6 @@ scipy
 sentence_transformers
 PyGithub
 networkx
+pdfplumber
 
 
