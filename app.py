@@ -10,7 +10,6 @@ from github import Github, GithubException, Auth  # 新增 Auth
 from pathlib import Path
 from io import BytesIO
 from typing import List, Dict, Any, Tuple, Optional
-from PyPDF2 import PdfReader
 from http import HTTPStatus
 import dashscope
 from dashscope import TextEmbedding
@@ -20,7 +19,10 @@ import matplotlib.pyplot as plt
 from scipy.interpolate import make_interp_spline
 from graphrag_retriever import GraphRAGRetriever, GraphRAGIndexer, Chunk
 import base64
-import pdfplumber
+import hashlib
+import fitz          # PyMuPDF: 渲染PDF为图片 + 文本提取
+import pytesseract   # OCR引擎接口
+from PIL import Image
 
 # ==========================================
 # [SECTION 0] 基础配置与路径定义
@@ -61,6 +63,8 @@ class PathConfig:
         self.RAG_DIR.mkdir(exist_ok=True)  # 确保RAG目录存在
         self.GRAPHRAG_DIR = self.DATA_DIR / "graphrag_artifacts"
         self.GRAPHRAG_DIR.mkdir(exist_ok=True)
+        self.OCR_CACHE_DIR = self.DATA_DIR / "ocr_cache"
+        self.OCR_CACHE_DIR.mkdir(exist_ok=True)
         # 向量库与持久化数据
         self.kb_index = self.DATA_DIR / "kb.index"
         self.kb_chunks = self.DATA_DIR / "kb_chunks.pkl"
@@ -204,6 +208,69 @@ class ResourceManager:
                     return json.load(f)
             except: pass
         return []
+
+# ==========================================
+# [SECTION 1.2] OCR 缓存管理
+# ==========================================
+
+class OCRCache:
+    """
+    PDF OCR 缓存管理。
+    对 PDF content 计算 MD5 作为唯一 key，OCR 结果存为 .txt。
+    本地缓存: tea_data/ocr_cache/{md5}.txt
+    GitHub 缓存: tea_data/ocr_cache/{md5}.txt（持久化，跨部署生效）
+    """
+
+    @staticmethod
+    def _md5(content: bytes) -> str:
+        return hashlib.md5(content).hexdigest()
+
+    @staticmethod
+    def get(content: bytes) -> str | None:
+        """查缓存，命中返回文本，未命中返回 None"""
+        md5 = OCRCache._md5(content)
+        cache_path = PATHS.OCR_CACHE_DIR / f"{md5}.txt"
+        if cache_path.exists():
+            try:
+                text = cache_path.read_text(encoding="utf-8")
+                if text.strip():
+                    print(f"[INFO]     → OCR 缓存命中: {md5[:8]}... ({len(text):,} 字符)")
+                    return text
+            except:
+                pass
+        return None
+
+    @staticmethod
+    def put(content: bytes, text: str, push_to_github: bool = True):
+        """写缓存（本地 + GitHub）"""
+        md5 = OCRCache._md5(content)
+        cache_path = PATHS.OCR_CACHE_DIR / f"{md5}.txt"
+        cache_path.write_text(text, encoding="utf-8")
+        print(f"[INFO]     → OCR 结果已缓存: {md5[:8]}... ({len(text):,} 字符)")
+        if push_to_github:
+            try:
+                github_path = f"tea_data/ocr_cache/{md5}.txt"
+                GithubSync.push_binary_file(github_path, text.encode("utf-8"), f"Cache OCR: {md5[:8]}")
+                print(f"[INFO]     → 缓存已同步到 GitHub")
+            except Exception as e:
+                print(f"[WARN]     → GitHub 缓存同步失败（不影响使用）: {e}")
+
+    @staticmethod
+    def pull_all_from_github():
+        """启动时从 GitHub 拉取所有 OCR 缓存到本地"""
+        try:
+            files = GithubSync.pull_rag_folder("tea_data/ocr_cache")
+            count = 0
+            for fname, content in files:
+                if fname.endswith(".txt"):
+                    local_path = PATHS.OCR_CACHE_DIR / fname
+                    if not local_path.exists():
+                        local_path.write_bytes(content)
+                        count += 1
+            if count > 0:
+                print(f"[INFO] 从 GitHub 拉取了 {count} 个 OCR 缓存文件")
+        except Exception as e:
+            print(f"[WARN] 拉取 OCR 缓存失败（不影响使用）: {e}")
 
 # ==========================================
 # [SECTION 1.5] Github 同步工具 (增强版)
@@ -896,7 +963,8 @@ def parse_file_bytes(filename: str, content: bytes) -> str:
     解析文件内容 (从 bytes) - 用于从 GitHub 拉取的文件
     支持格式: .txt, .pdf, .docx
     
-    [修复] PDF 解析改用 pdfplumber，解决中文 CID 字体乱码问题
+    PDF 采用三级策略：缓存 → PyMuPDF文本提取 → 乱码检测 → OCR
+    同一个 PDF（按 MD5）永远只 OCR 一次
     """
     try:
         # 1. 处理 TXT 文件
@@ -905,57 +973,9 @@ def parse_file_bytes(filename: str, content: bytes) -> str:
             print(f"[INFO]     → TXT 解析成功: {len(text)} 字符")
             return text
 
-        # 2. 处理 PDF 文件 —— 使用 pdfplumber（关键修改）
+        # 2. 处理 PDF 文件
         elif filename.lower().endswith('.pdf'):
-            try:
-                print(f"[INFO]     → 开始解析 PDF (pdfplumber)...")
-                print(f"[INFO]     → 文件大小: {len(content):,} bytes")
-
-                if not content.startswith(b'%PDF'):
-                    print(f"[ERROR]    → 不是有效的 PDF 文件（文件头错误）")
-                    return ""
-
-                text = ""
-                failed_pages = []
-
-                with pdfplumber.open(BytesIO(content)) as pdf:
-                    page_count = len(pdf.pages)
-                    print(f"[INFO]     → PDF 共 {page_count} 页")
-
-                    for idx, page in enumerate(pdf.pages, 1):
-                        try:
-                            page_text = page.extract_text()
-                            if page_text:
-                                text += page_text + "\n"
-                            if idx % 10 == 0:
-                                print(f"[INFO]     → 已处理 {idx}/{page_count} 页")
-                        except Exception as e:
-                            failed_pages.append(idx)
-                            print(f"[WARN]     → 第 {idx} 页解析失败: {e}")
-                            continue
-
-                if failed_pages:
-                    print(f"[WARN]     → 共 {len(failed_pages)} 页解析失败")
-
-                if text.strip():
-                    # ── 关键：验证是否还有乱码 ──
-                    glyph_ratio = text.count('/G') / max(len(text), 1)
-                    if glyph_ratio > 0.01:  # 超过1%的内容是 /Gxx 格式，说明仍有问题
-                        print(f"[WARN]     → 检测到疑似 glyph 乱码 (比例: {glyph_ratio:.2%})")
-                        print(f"[WARN]     → 前200字符预览: {text[:200]}")
-                    else:
-                        print(f"[INFO]     → PDF 解析完成: {len(text):,} 字符 ✅")
-                        print(f"[INFO]     → 前100字符预览: {text[:100]}")
-                    return text
-                else:
-                    print(f"[WARN]     → PDF 解析结果为空")
-                    return ""
-
-            except Exception as e:
-                print(f"[ERROR]    ✗ PDF (pdfplumber) 解析失败: {type(e).__name__}: {e}")
-                import traceback
-                traceback.print_exc()
-                return ""
+            return _parse_pdf_with_cache(filename, content)
 
         # 3. 处理 DOCX 文件
         elif filename.lower().endswith('.docx'):
@@ -973,6 +993,102 @@ def parse_file_bytes(filename: str, content: bytes) -> str:
         import traceback
         traceback.print_exc()
         return ""
+
+
+def _is_garbled(text: str) -> bool:
+    """
+    检测 PDF 提取的文本是否是 CID 字体乱码。
+    特征：
+    - (cid:xxx) 标记 → 中文未解码
+    - 犭部首字符密集（犌犅犜犕犲狋犺...）→ 英文被错误映射
+    """
+    if not text or len(text) < 50:
+        return True
+
+    cid_count = text.count('(cid:')
+    # 犭部首区间：犬(U+72AC) ~ 猟(U+739F)
+    dog_count = sum(1 for c in text if '\u72ac' <= c <= '\u739f')
+    total = len(text)
+
+    cid_bad = cid_count / total > 0.02
+    dog_bad = dog_count / total > 0.03
+
+    if cid_bad or dog_bad:
+        print(f"[WARN]     → 乱码检测: (cid:)={cid_count}, 犭部首={dog_count}, 总长={total}")
+        return True
+    return False
+
+
+def _parse_pdf_with_cache(filename: str, content: bytes) -> str:
+    """PDF 解析主入口：缓存 → PyMuPDF文本提取 → 乱码则OCR"""
+    print(f"[INFO]     → 开始解析 PDF: {filename} ({len(content):,} bytes)")
+
+    if not content.startswith(b'%PDF'):
+        print(f"[ERROR]    → 不是有效的 PDF 文件")
+        return ""
+
+    # ━━━ 第1步：查缓存 ━━━
+    cached = OCRCache.get(content)
+    if cached:
+        return cached
+
+    # ━━━ 第2步：尝试 PyMuPDF 文本提取 ━━━
+    print(f"[INFO]     → 缓存未命中，尝试 PyMuPDF 文本提取...")
+    try:
+        doc = fitz.open(stream=content, filetype="pdf")
+        text = ""
+        for page in doc:
+            text += page.get_text() + "\n"
+        doc.close()
+
+        if text.strip() and not _is_garbled(text):
+            print(f"[INFO]     → ✅ 文本提取成功: {len(text):,} 字符")
+            OCRCache.put(content, text)
+            return text
+        else:
+            print(f"[WARN]     → 文本提取结果为乱码，切换 OCR")
+    except Exception as e:
+        print(f"[WARN]     → PyMuPDF 提取失败: {e}")
+
+    # ━━━ 第3步：OCR ━━━
+    print(f"[INFO]     → 启动 OCR...")
+    try:
+        text = _ocr_pdf(content)
+        if text.strip():
+            print(f"[INFO]     → ✅ OCR 完成: {len(text):,} 字符")
+            OCRCache.put(content, text)
+            return text
+        else:
+            print(f"[WARN]     → OCR 结果为空")
+            return ""
+    except Exception as e:
+        print(f"[ERROR]    → OCR 失败: {e}")
+        import traceback
+        traceback.print_exc()
+        return ""
+
+
+def _ocr_pdf(content: bytes, dpi: int = 300) -> str:
+    """PyMuPDF 渲染 + Tesseract OCR"""
+    doc = fitz.open(stream=content, filetype="pdf")
+    total = len(doc)
+    print(f"[INFO]     → PDF 共 {total} 页, DPI={dpi}")
+
+    all_text = []
+    for i, page in enumerate(doc, 1):
+        try:
+            zoom = dpi / 72.0
+            pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom))
+            img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+            page_text = pytesseract.image_to_string(img, lang='chi_sim+eng', config='--psm 6')
+            if page_text.strip():
+                all_text.append(page_text)
+            if i % 10 == 0 or i == total:
+                print(f"[INFO]     → OCR 进度: {i}/{total}")
+        except Exception as e:
+            print(f"[WARN]     → 第 {i} 页 OCR 失败: {e}")
+    doc.close()
+    return "\n".join(all_text)
     
 def parse_file(uploaded_file) -> str:
     """解析上传文件（Streamlit UploadedFile 对象）"""
@@ -980,12 +1096,9 @@ def parse_file(uploaded_file) -> str:
         if uploaded_file.name.endswith('.txt'):
             return uploaded_file.read().decode("utf-8")
         if uploaded_file.name.endswith('.pdf'):
-            # [修复] 使用 pdfplumber 替代 PyPDF2
-            with pdfplumber.open(uploaded_file) as pdf:
-                return "\n".join([
-                    page.extract_text() or ""
-                    for page in pdf.pages
-                ])
+            uploaded_file.seek(0)
+            content = uploaded_file.read()
+            return _parse_pdf_with_cache(uploaded_file.name, content)
         if uploaded_file.name.endswith('.docx'):
             return "\n".join([p.text for p in Document(uploaded_file).paragraphs])
     except Exception as e:
@@ -1092,6 +1205,9 @@ def load_rag_from_github(aliyun_key: str) -> Tuple[bool, str]:
     """
     print("\n[INFO] ========== 开始从 GitHub 加载 RAG 数据 ==========")
     
+    # >>> 新增：先拉取 OCR 缓存，避免重复 OCR <<<
+    OCRCache.pull_all_from_github()
+    
     try:
         # 1. 拉取文件
         print("[INFO] 步骤 1/4: 从 GitHub 拉取 RAG 文件...")
@@ -1192,27 +1308,6 @@ def load_rag_from_github(aliyun_key: str) -> Tuple[bool, str]:
                 print("[WARN] ⚠️ GraphRAG artifacts 构建未完成，将使用纯向量检索")
         except Exception as e:
             print(f"[WARN] GraphRAG 构建异常（不影响基本功能）: {e}")
-
-        # 6. (Offline / semi-offline) Build GraphRAG artifacts for the static KB
-        #    This enables GraphRAGRetriever to expand vector seeds by graph neighborhoods.
-        try:
-            kb_out_dir = str(PATHS.GRAPHRAG_DIR)
-            os.makedirs(kb_out_dir, exist_ok=True)
-
-            # Build a lightweight graph from chunks.
-            # For production, you can swap RuleBasedExtractor with an LLM-assisted extractor.
-            indexer = GraphRAGIndexer()  # default RuleBasedExtractor
-            indexer.add_chunks([
-                Chunk(chunk_id=str(i), text=chunks[i], source="kb")
-                for i in range(len(chunks))
-            ])
-            indexer.build_communities(min_size=5)
-            # community summaries are optional; can be added by an external batch job
-            indexer.save(kb_out_dir)
-            print(f"[INFO]   ✓ GraphRAG artifacts saved to: {kb_out_dir}")
-        except Exception as e:
-            # Do not fail the whole loading if graph build is unavailable.
-            print(f"[WARN]   GraphRAG artifact build failed (fallback to vector-only): {e}")
         
         success_files = [f for f in file_names if f not in parse_failed]
         msg = f"✅ 成功加载 {len(chunks)} 条知识片段\n📁 来源文件: {', '.join(success_files)}"
