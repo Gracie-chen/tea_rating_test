@@ -652,6 +652,117 @@ def _get_graphrag_retriever() -> 'GraphRAGRetriever | None':
         st.session_state["_gr_retriever_loaded"] = True
         st.session_state["_gr_retriever_obj"] = None
         return None
+def build_graphrag_artifacts(kb_chunks: list, force_rebuild: bool = False) -> bool:
+    """
+    从已有的 kb_chunks 构建 GraphRAG artifact 文件，并同步到 GitHub。
+    """
+    artifact_dir = str(PATHS.GRAPHRAG_DIR)
+    edges_path = os.path.join(artifact_dir, "graph_edges.jsonl")
+    comm_path = os.path.join(artifact_dir, "communities.json")
+    
+    # 如果 artifact 已存在且不强制重建，跳过
+    if not force_rebuild and os.path.exists(edges_path) and os.path.exists(comm_path):
+        print("[INFO] GraphRAG artifacts 已存在，跳过构建")
+        return True
+    
+    if not kb_chunks:
+        print("[WARN] kb_chunks 为空，无法构建 GraphRAG artifacts")
+        return False
+    
+    print(f"\n[INFO] ========== 开始构建 GraphRAG Artifacts ==========")
+    print(f"[INFO] 共 {len(kb_chunks)} 个文本块待处理")
+    
+    try:
+        # 1. 将 kb_chunks 转为 Chunk 对象
+        chunks = []
+        for i, text in enumerate(kb_chunks):
+            if not text or not text.strip():
+                continue
+            chunks.append(Chunk(
+                chunk_id=str(i),
+                text=text.strip(),
+                source=f"kb_chunk_{i}",
+                tags={}
+            ))
+        
+        if not chunks:
+            print("[WARN] 有效文本块为0，无法构建 GraphRAG")
+            return False
+        
+        print(f"[INFO] 有效文本块: {len(chunks)}")
+        
+        # 2. 构建索引（默认使用 RuleBasedExtractor）
+        indexer = GraphRAGIndexer()
+        indexer.add_chunks(chunks)
+        
+        node_count = indexer.graph.number_of_nodes()
+        edge_count = indexer.graph.number_of_edges()
+        print(f"[INFO] 图构建完成: {node_count} 个节点, {edge_count} 条边")
+        
+        # 3. 发现社区（茶饮领域实体可能较少，降低 min_size 阈值）
+        if node_count > 0:
+            communities = indexer.build_communities(min_size=2)
+            print(f"[INFO] 发现 {len(communities)} 个社区")
+        else:
+            print("[WARN] 图中无节点，跳过社区发现")
+        
+        # 4. 保存到本地
+        indexer.save(artifact_dir)
+        print(f"[INFO] Artifacts 已保存到: {artifact_dir}")
+        
+        # 5. 验证生成的文件
+        for fname in ["graph_edges.jsonl", "communities.json", "graph_nodes.json", "chunk_meta.jsonl"]:
+            fpath = os.path.join(artifact_dir, fname)
+            if os.path.exists(fpath):
+                print(f"[INFO]   ✅ {fname}: {os.path.getsize(fpath):,} bytes")
+            else:
+                print(f"[WARN]   ❌ {fname}: 未生成")
+        
+        # 6. 同步到 GitHub
+        print("[INFO] 正在同步 artifacts 到 GitHub...")
+        github_ok = _push_graphrag_artifacts_to_github(artifact_dir)
+        if github_ok:
+            print("[INFO] ✅ GraphRAG artifacts 已同步到 GitHub")
+        else:
+            print("[WARN] ⚠️ GitHub 同步失败，本地文件已生成，不影响本次运行")
+        
+        # 7. 清除 retriever 缓存，使下次检索重新加载
+        st.session_state["_gr_retriever_loaded"] = False
+        st.session_state["_gr_retriever_obj"] = None
+        
+        print(f"[INFO] ========== GraphRAG Artifacts 构建完成 ==========\n")
+        return True
+        
+    except Exception as e:
+        print(f"[ERROR] GraphRAG artifacts 构建失败: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+
+def _push_graphrag_artifacts_to_github(artifact_dir: str) -> bool:
+    """将本地 GraphRAG artifact 文件推送到 GitHub"""
+    github_folder = "tea_data/graphrag_artifacts"
+    files_to_push = ["graph_edges.jsonl", "communities.json", "graph_nodes.json", "chunk_meta.jsonl"]
+    
+    all_success = True
+    for fname in files_to_push:
+        local_path = os.path.join(artifact_dir, fname)
+        if not os.path.exists(local_path):
+            continue
+        try:
+            with open(local_path, "rb") as f:
+                content = f.read()
+            github_path = f"{github_folder}/{fname}"
+            success = GithubSync.push_binary_file(github_path, content, f"Update GraphRAG artifact: {fname}")
+            if success:
+                print(f"[INFO]   ✅ 已推送: {github_path}")
+            else:
+                all_success = False
+        except Exception as e:
+            print(f"[ERROR]  推送 {fname} 异常: {e}")
+            all_success = False
+    return all_success
 
 def graphrag_static_kb_context(query_vec: np.ndarray,
                               kb_index: faiss.Index,
@@ -1065,6 +1176,17 @@ def load_rag_from_github(aliyun_key: str) -> Tuple[bool, str]:
         # Build GraphRAG-style community summaries for static KB chunks (non-case)
         ResourceManager.save(kb_idx, chunks, PATHS.kb_index, PATHS.kb_chunks)
         ResourceManager.save_kb_files(file_names)
+        # >>> 新增：构建 GraphRAG artifacts <<<
+       
+        try:
+            print("[INFO] 步骤 新增: 构建 GraphRAG artifacts...")
+            graphrag_ok = build_graphrag_artifacts(chunks, force_rebuild=True)
+            if graphrag_ok:
+                print("[INFO] ✅ GraphRAG artifacts 构建并同步成功")
+            else:
+                print("[WARN] ⚠️ GraphRAG artifacts 构建未完成，将使用纯向量检索")
+        except Exception as e:
+            print(f"[WARN] GraphRAG 构建异常（不影响基本功能）: {e}")
 
         # 6. (Offline / semi-offline) Build GraphRAG artifacts for the static KB
         #    This enables GraphRAGRetriever to expand vector seeds by graph neighborhoods.
