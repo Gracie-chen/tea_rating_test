@@ -705,9 +705,15 @@ def _get_graphrag_retriever() -> 'GraphRAGRetriever | None':
     artifact_dir = _get_graphrag_artifact_dir()
     edges_path = os.path.join(artifact_dir, "graph_edges.jsonl")
     comm_path = os.path.join(artifact_dir, "communities.json")
+    nodes_path = os.path.join(artifact_dir, "graph_nodes.json")
+    meta_path = os.path.join(artifact_dir, "chunk_meta.jsonl")
+    # >>> 修复：检查全部 4 个 artifact 文件 <<<
     if not (os.path.exists(edges_path) and os.path.exists(comm_path)):
+        # edges 和 communities 是 retriever 运行的最低要求
         st.session_state["_gr_retriever_loaded"] = True
         st.session_state["_gr_retriever_obj"] = None
+        if not os.path.exists(nodes_path) or not os.path.exists(meta_path):
+            print(f"[WARN] GraphRAG artifacts 不完整: nodes={os.path.exists(nodes_path)}, meta={os.path.exists(meta_path)}")
         return None
 
     try:
@@ -720,18 +726,29 @@ def _get_graphrag_retriever() -> 'GraphRAGRetriever | None':
         st.session_state["_gr_retriever_loaded"] = True
         st.session_state["_gr_retriever_obj"] = None
         return None
-def build_graphrag_artifacts(kb_chunks: list, force_rebuild: bool = False) -> bool:
+def build_graphrag_artifacts(kb_chunks: list, force_rebuild: bool = False,
+                            chunk_source_map: dict = None, file_names: list = None) -> bool:
     """
     从已有的 kb_chunks 构建 GraphRAG artifact 文件，并同步到 GitHub。
+    
+    参数:
+        kb_chunks: 文本块列表
+        force_rebuild: 是否强制重建（即使 artifact 已存在）
+        chunk_source_map: {chunk_index: source_file_name} 映射（可选）
+        file_names: 来源文件名列表（可选，用于标注 chunk meta）
     """
     artifact_dir = str(PATHS.GRAPHRAG_DIR)
-    edges_path = os.path.join(artifact_dir, "graph_edges.jsonl")
-    comm_path = os.path.join(artifact_dir, "communities.json")
+    # >>> 修复：检查全部 4 个 artifact 文件，而非仅 edges + communities <<<
+    required_files = ["graph_edges.jsonl", "communities.json", "graph_nodes.json", "chunk_meta.jsonl"]
+    all_exist = all(os.path.exists(os.path.join(artifact_dir, f)) for f in required_files)
     
-    # 如果 artifact 已存在且不强制重建，跳过
-    if not force_rebuild and os.path.exists(edges_path) and os.path.exists(comm_path):
-        print("[INFO] GraphRAG artifacts 已存在，跳过构建")
+    if not force_rebuild and all_exist:
+        print("[INFO] GraphRAG artifacts 已存在（4个文件齐全），跳过构建")
         return True
+    
+    if not force_rebuild and not all_exist:
+        missing = [f for f in required_files if not os.path.exists(os.path.join(artifact_dir, f))]
+        print(f"[INFO] GraphRAG artifacts 不完整，缺失: {missing}，将重新构建")
     
     if not kb_chunks:
         print("[WARN] kb_chunks 为空，无法构建 GraphRAG artifacts")
@@ -742,15 +759,24 @@ def build_graphrag_artifacts(kb_chunks: list, force_rebuild: bool = False) -> bo
     
     try:
         # 1. 将 kb_chunks 转为 Chunk 对象
+        # >>> 修复：使用 chunk_source_map 传入有意义的 source 信息 <<<
         chunks = []
         for i, text in enumerate(kb_chunks):
             if not text or not text.strip():
                 continue
+            # 确定 source 信息
+            if chunk_source_map and i in chunk_source_map:
+                source = chunk_source_map[i]
+            elif file_names:
+                source = ",".join(file_names[:3])  # 至少标记来自哪些文件
+            else:
+                source = f"kb_chunk_{i}"
+            
             chunks.append(Chunk(
                 chunk_id=str(i),
                 text=text.strip(),
-                source=f"kb_chunk_{i}",
-                tags={}
+                source=source,
+                tags={"chunk_index": str(i)}
             ))
         
         if not chunks:
@@ -778,13 +804,18 @@ def build_graphrag_artifacts(kb_chunks: list, force_rebuild: bool = False) -> bo
         indexer.save(artifact_dir)
         print(f"[INFO] Artifacts 已保存到: {artifact_dir}")
         
-        # 5. 验证生成的文件
-        for fname in ["graph_edges.jsonl", "communities.json", "graph_nodes.json", "chunk_meta.jsonl"]:
+        # 5. 验证生成的文件 — 全部 4 个都必须存在
+        all_generated = True
+        for fname in required_files:
             fpath = os.path.join(artifact_dir, fname)
             if os.path.exists(fpath):
                 print(f"[INFO]   ✅ {fname}: {os.path.getsize(fpath):,} bytes")
             else:
                 print(f"[WARN]   ❌ {fname}: 未生成")
+                all_generated = False
+        
+        if not all_generated:
+            print("[ERROR] 部分 artifact 文件未生成，构建可能不完整")
         
         # 6. 同步到 GitHub
         print("[INFO] 正在同步 artifacts 到 GitHub...")
@@ -817,6 +848,8 @@ def _push_graphrag_artifacts_to_github(artifact_dir: str) -> bool:
     for fname in files_to_push:
         local_path = os.path.join(artifact_dir, fname)
         if not os.path.exists(local_path):
+            print(f"[WARN]   ⚠️ 本地文件不存在，跳过推送: {fname}")
+            all_success = False
             continue
         try:
             with open(local_path, "rb") as f:
@@ -1309,6 +1342,43 @@ def load_rag_from_github(aliyun_key: str) -> Tuple[bool, str]:
         chunks = [all_text[i:i+600] for i in range(0, len(all_text), 500)]
         print(f"[INFO]   ✓ 切片完成: {len(chunks)} 个片段")
         
+        # >>> 新增：构建 chunk → 源文件 的映射 <<<
+        # 按各文件解析的文本长度，推算每个 chunk 属于哪个文件
+        chunk_source_map = {}
+        if file_names and parse_success > 0:
+            try:
+                # 重新解析获取每个文件的文本长度
+                file_lengths = []
+                for fname, fcontent in rag_files:
+                    parsed = parse_file_bytes(fname, fcontent)
+                    flen = len(parsed) + 1 if (parsed and len(parsed.strip()) > 100) else 0  # +1 for "\n"
+                    file_lengths.append((fname, flen))
+                
+                # 按累计偏移量确定每个 chunk 属于哪个文件
+                cum_offset = 0
+                file_idx = 0
+                for chunk_idx in range(len(chunks)):
+                    chunk_start = chunk_idx * 500  # 步长500
+                    # 跳到正确的文件
+                    offset_check = 0
+                    for fi, (fn, fl) in enumerate(file_lengths):
+                        if fl == 0:
+                            continue
+                        if chunk_start < offset_check + fl:
+                            chunk_source_map[chunk_idx] = fn
+                            break
+                        offset_check += fl
+                    else:
+                        # 超出范围，标记为最后一个有效文件
+                        last_valid = [fn for fn, fl in file_lengths if fl > 0]
+                        if last_valid:
+                            chunk_source_map[chunk_idx] = last_valid[-1]
+                
+                print(f"[INFO]   ✓ chunk 来源映射构建完成: {len(chunk_source_map)} 条")
+            except Exception as e:
+                print(f"[WARN]   chunk 来源映射构建失败（不影响功能）: {e}")
+                chunk_source_map = {}
+        
         if not chunks:
             msg = "切片失败"
             print(f"[ERROR] {msg}")
@@ -1355,7 +1425,12 @@ def load_rag_from_github(aliyun_key: str) -> Tuple[bool, str]:
        
         try:
             print("[INFO] 步骤 新增: 构建 GraphRAG artifacts...")
-            graphrag_ok = build_graphrag_artifacts(chunks, force_rebuild=True)
+            graphrag_ok = build_graphrag_artifacts(
+                chunks, 
+                force_rebuild=True,
+                chunk_source_map=chunk_source_map,
+                file_names=file_names
+            )
             if graphrag_ok:
                 print("[INFO] ✅ GraphRAG artifacts 构建并同步成功")
             else:
