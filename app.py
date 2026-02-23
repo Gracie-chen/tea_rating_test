@@ -998,64 +998,118 @@ def parse_file_bytes(filename: str, content: bytes) -> str:
 def _is_garbled(text: str) -> bool:
     """
     检测 PDF 提取的文本是否是 CID 字体乱码。
-    特征：
-    - (cid:xxx) 标记 → 中文未解码
-    - 犭部首字符密集（犌犅犜犕犲狋犺...）→ 英文被错误映射
+    
+    三种乱码模式：
+    1. (cid:xxx) 标记 → CID字体无ToUnicode映射
+    2. 犭部首字符密集（犌犅犜犕犲狋犺...）→ 英文被错误映射为汉字
+    3. ASCII替代乱码（!"#$%&'() 替代中文）→ 中文被映射为ASCII码位
+       GB/T 23776 就是这种！表面看全是英文字母和标点，实际是中文
     """
     if not text or len(text) < 50:
         return True
 
-    cid_count = text.count('(cid:')
-    # 犭部首区间：犬(U+72AC) ~ 猟(U+739F)
-    dog_count = sum(1 for c in text if '\u72ac' <= c <= '\u739f')
-    total = len(text)
-
-    cid_bad = cid_count / total > 0.02
-    dog_bad = dog_count / total > 0.03
-
-    if cid_bad or dog_bad:
-        print(f"[WARN]     → 乱码检测: (cid:)={cid_count}, 犭部首={dog_count}, 总长={total}")
+    # 只统计非空白字符
+    non_ws = [c for c in text if not c.isspace()]
+    total = len(non_ws)
+    if total < 30:
         return True
+
+    # ── 检测1: (cid:xxx) 标记 ──
+    cid_count = text.count('(cid:')
+    if cid_count / total > 0.01:
+        print(f"[WARN]     → 乱码检测: (cid:) 标记 = {cid_count} ({cid_count/total:.1%})")
+        return True
+
+    # ── 检测2: 犭部首字符（扩大范围 U+7280~U+739F 覆盖犌犅犜等） ──
+    dog_count = sum(1 for c in non_ws if '\u7280' <= c <= '\u739f')
+    if dog_count / total > 0.02:
+        print(f"[WARN]     → 乱码检测: 犭部首字符 = {dog_count} ({dog_count/total:.1%})")
+        return True
+
+    # ── 检测3: CJK 字符占比过低（最关键！捕获 ASCII 替代乱码） ──
+    # 正常中文文档 CJK 占比应 > 20%。如果 < 5%，几乎肯定是乱码。
+    cjk_count = sum(1 for c in non_ws if '\u4e00' <= c <= '\u9fff')
+    cjk_ratio = cjk_count / total
+
+    # 同时统计全角字符（ＧＢ／Ｔ 等），乱码PDF常见
+    fullwidth_count = sum(1 for c in non_ws if '\uff01' <= c <= '\uff5e')
+    fullwidth_ratio = fullwidth_count / total
+
+    # 统计普通 ASCII 字母+标点（排除数字，因为正常文档也有数字）
+    ascii_letters_punct = sum(1 for c in non_ws 
+                              if ('!' <= c <= '/' or ':' <= c <= '@' 
+                                  or '[' <= c <= '`' or '{' <= c <= '~'
+                                  or 'A' <= c <= 'Z' or 'a' <= c <= 'z'))
+    ascii_ratio = ascii_letters_punct / total
+
+    # 判断：CJK极少 + ASCII字母标点过多 = 中文被映射成了ASCII
+    if cjk_ratio < 0.05 and ascii_ratio > 0.25:
+        print(f"[WARN]     → 乱码检测: CJK={cjk_count}({cjk_ratio:.1%}), "
+              f"ASCII字母标点={ascii_letters_punct}({ascii_ratio:.1%}), "
+              f"全角={fullwidth_count}({fullwidth_ratio:.1%}) → ASCII替代乱码")
+        return True
+
+    # 更宽松的检测：CJK < 10% 且 全角字符多（乱码PDF常把半角转全角）
+    if cjk_ratio < 0.10 and fullwidth_ratio > 0.05 and ascii_ratio > 0.15:
+        print(f"[WARN]     → 乱码检测: CJK={cjk_ratio:.1%}, 全角={fullwidth_ratio:.1%}, "
+              f"ASCII={ascii_ratio:.1%} → 疑似乱码")
+        return True
+
     return False
 
 
-def _parse_pdf_with_cache(filename: str, content: bytes) -> str:
-    """PDF 解析主入口：缓存 → PyMuPDF文本提取 → 乱码则OCR"""
+def _parse_pdf_with_cache(filename: str, content: bytes, force_ocr: bool = False) -> str:
+    """PDF 解析主入口：缓存 → PyMuPDF文本提取 → 乱码则OCR
+    
+    Args:
+        force_ocr: 跳过缓存和文本提取，直接OCR（用于修复错误缓存）
+    """
     print(f"[INFO]     → 开始解析 PDF: {filename} ({len(content):,} bytes)")
 
     if not content.startswith(b'%PDF'):
         print(f"[ERROR]    → 不是有效的 PDF 文件")
         return ""
 
-    # ━━━ 第1步：查缓存 ━━━
-    cached = OCRCache.get(content)
-    if cached:
-        return cached
+    # ━━━ 第1步：查缓存（force_ocr时跳过） ━━━
+    if not force_ocr:
+        cached = OCRCache.get(content)
+        if cached:
+            # 验证缓存内容是否也是乱码（修复之前缓存了乱码文本的情况）
+            if not _is_garbled(cached):
+                return cached
+            else:
+                print(f"[WARN]     → 缓存内容为乱码，将重新解析")
 
-    # ━━━ 第2步：尝试 PyMuPDF 文本提取 ━━━
-    print(f"[INFO]     → 缓存未命中，尝试 PyMuPDF 文本提取...")
-    try:
-        doc = fitz.open(stream=content, filetype="pdf")
-        text = ""
-        for page in doc:
-            text += page.get_text() + "\n"
-        doc.close()
+    # ━━━ 第2步：尝试 PyMuPDF 文本提取（force_ocr时跳过） ━━━
+    if not force_ocr:
+        print(f"[INFO]     → 尝试 PyMuPDF 文本提取...")
+        try:
+            doc = fitz.open(stream=content, filetype="pdf")
+            text = ""
+            for page in doc:
+                text += page.get_text() + "\n"
+            doc.close()
 
-        if text.strip() and not _is_garbled(text):
-            print(f"[INFO]     → ✅ 文本提取成功: {len(text):,} 字符")
-            OCRCache.put(content, text)
-            return text
-        else:
-            print(f"[WARN]     → 文本提取结果为乱码，切换 OCR")
-    except Exception as e:
-        print(f"[WARN]     → PyMuPDF 提取失败: {e}")
+            if text.strip() and not _is_garbled(text):
+                print(f"[INFO]     → ✅ 文本提取成功: {len(text):,} 字符")
+                OCRCache.put(content, text)
+                return text
+            else:
+                print(f"[WARN]     → 文本提取结果为乱码，切换 OCR")
+        except Exception as e:
+            print(f"[WARN]     → PyMuPDF 提取失败: {e}")
 
     # ━━━ 第3步：OCR ━━━
-    print(f"[INFO]     → 启动 OCR...")
+    print(f"[INFO]     → 启动 OCR（Tesseract）...")
     try:
         text = _ocr_pdf(content)
         if text.strip():
-            print(f"[INFO]     → ✅ OCR 完成: {len(text):,} 字符")
+            # OCR 后也验证一下质量
+            if _is_garbled(text):
+                print(f"[WARN]     → ⚠️ OCR 结果疑似乱码，但仍保存（可能是渲染问题）")
+                print(f"[WARN]     → 前200字: {text[:200]}")
+            else:
+                print(f"[INFO]     → ✅ OCR 完成: {len(text):,} 字符")
             OCRCache.put(content, text)
             return text
         else:
