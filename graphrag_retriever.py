@@ -128,8 +128,10 @@ def _safe_json_loads(s: str) -> Optional[Any]:
 def _norm_entity(e: str, max_len: int) -> str:
     e = (e or "").strip()
     e = re.sub(r"\s+", "", e)  # remove spaces/newlines
-    # trim punctuation ends
-    e = e.strip(" ,;:，；：。()（）[]【】<>《》\"“”'’\n\r\t")
+    # 清理转义换行
+    e = e.replace("\\n", "").replace("\\r", "").replace("\\t", "")
+    # trim punctuation ends (扩展了更多符号)
+    e = e.strip(" ,;:，；：。()（）[]【】<>《》\"“”\'‘’\n\r\t!！#$%^&*+~`@")
     if len(e) > max_len:
         e = e[:max_len]
     return e
@@ -137,17 +139,57 @@ def _norm_entity(e: str, max_len: int) -> str:
 def _bad_entity(e: str) -> bool:
     if not e:
         return True
-    if len(e) < 1:
+    if len(e) < 2:
+        # 单字符实体（如 "!"、"#"、"("）一律过滤
         return True
     if "\n" in e or "\r" in e:
         return True
-    # Reject if too numeric or looks like a paragraph
+    # Reject if too long — looks like a paragraph
     if len(e) >= 24:
         return True
     # Long ASCII sequences are usually noise for Chinese domain entities
     if re.fullmatch(r"[A-Za-z0-9_./\-]{8,}", e or ""):
         return True
+    # 纯标点 / 纯符号 / 纯数字 → 噪声
+    if re.fullmatch(r"[\W\d_]+", e):
+        return True
+    # 含有 CJK 兼容字符区段（犌犅犜 等 OCR 乱码常出现在 U+7280-U+72FF 及类似段）
+    # 检测：如果实体中"生僻字"（非常见 CJK 基本集高频字）占比 >50%，视为乱码
+    if _is_garbled_chinese(e):
+        return True
+    # 以 \n 开头或结尾的片段
+    if e.startswith("\\n") or e.endswith("\\n"):
+        return True
     return False
+
+
+# ---------------------
+# OCR 乱码检测
+# ---------------------
+# PDF OCR 乱码特征：拉丁字母被错误映射到 CJK 码位（常见于 U+7280-U+72FF 犬部字符）
+# 例如: "犌犅／犜" = "GB/T", "狊犲狀狊狅狉" = "sensor"
+_GARBLED_CJK_RANGE = re.compile(r'[\u7280-\u72FF]')  # 犬/犭部：PDF乱码高发区
+_GARBLED_CJK_RANGE2 = re.compile(r'[\u7240-\u727F]')  # 牛/牜部：另一个高发区
+
+def _is_garbled_chinese(e: str) -> bool:
+    """
+    检测疑似 PDF-OCR 乱码的实体。
+    策略：如果实体中超过 30% 的字符落在 CJK 乱码高发区（U+7280-U+72FF），
+    则判定为 OCR 错误映射，而非有效实体。
+    
+    典型乱码: 犌犅犜 (=GB/T), 狊犲狀狊狅狉犲狏犪犾狌犪狋犻狅狀 (=sensoryevaluation)
+    """
+    if not e:
+        return False
+    total = len(e)
+    if total < 2:
+        return False
+    garbled_count = len(_GARBLED_CJK_RANGE.findall(e)) + len(_GARBLED_CJK_RANGE2.findall(e))
+    if garbled_count == 0:
+        return False
+    garbled_ratio = garbled_count / total
+    # 如果 >30% 字符在乱码区域，认定为乱码
+    return garbled_ratio > 0.3
 
 def _norm_relation(r: str) -> str:
     r = (r or "").strip()
