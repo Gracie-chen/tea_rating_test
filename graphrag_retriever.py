@@ -34,6 +34,11 @@ import json
 import os
 import re
 import time
+
+# ======== PATCH VERSION — 部署后启动日志会打印此版本号 ========
+_GRAPHRAG_RETRIEVER_VERSION = "2.1.0-patched-2026-02-23"
+print(f"[GRAPHRAG] graphrag_retriever.py v{_GRAPHRAG_RETRIEVER_VERSION} 已加载")
+# =============================================================
 from dataclasses import dataclass, asdict
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
@@ -128,68 +133,55 @@ def _safe_json_loads(s: str) -> Optional[Any]:
 def _norm_entity(e: str, max_len: int) -> str:
     e = (e or "").strip()
     e = re.sub(r"\s+", "", e)  # remove spaces/newlines
-    # 清理转义换行
     e = e.replace("\\n", "").replace("\\r", "").replace("\\t", "")
-    # trim punctuation ends (扩展了更多符号)
-    e = e.strip(" ,;:，；：。()（）[]【】<>《》\"“”\'‘’\n\r\t!！#$%^&*+~`@")
+    # trim punctuation ends (扩展噪声符号)
+    e = e.strip(" ,;:\n\r\t!！#$%^&*+~`@"
+                "，；：。()（）[]【】<>《》"
+                "\"“”\'‘’")
     if len(e) > max_len:
         e = e[:max_len]
     return e
 
 def _bad_entity(e: str) -> bool:
+    """过滤无效/噪声实体（v2.1: 过滤单字符、纯符号、OCR乱码）"""
     if not e:
         return True
     if len(e) < 2:
-        # 单字符实体（如 "!"、"#"、"("）一律过滤
-        return True
+        return True  # 单字符一律过滤
     if "\n" in e or "\r" in e:
         return True
-    # Reject if too long — looks like a paragraph
     if len(e) >= 24:
         return True
-    # Long ASCII sequences are usually noise for Chinese domain entities
     if re.fullmatch(r"[A-Za-z0-9_./\-]{8,}", e or ""):
         return True
-    # 纯标点 / 纯符号 / 纯数字 → 噪声
+    # 纯标点/纯符号/纯数字 → 噪声
     if re.fullmatch(r"[\W\d_]+", e):
         return True
-    # 含有 CJK 兼容字符区段（犌犅犜 等 OCR 乱码常出现在 U+7280-U+72FF 及类似段）
-    # 检测：如果实体中"生僻字"（非常见 CJK 基本集高频字）占比 >50%，视为乱码
+    # PDF OCR 乱码检测
     if _is_garbled_chinese(e):
-        return True
-    # 以 \n 开头或结尾的片段
-    if e.startswith("\\n") or e.endswith("\\n"):
         return True
     return False
 
 
-# ---------------------
-# OCR 乱码检测
-# ---------------------
-# PDF OCR 乱码特征：拉丁字母被错误映射到 CJK 码位（常见于 U+7280-U+72FF 犬部字符）
-# 例如: "犌犅／犜" = "GB/T", "狊犲狀狊狅狉" = "sensor"
-_GARBLED_CJK_RANGE = re.compile(r'[\u7280-\u72FF]')  # 犬/犭部：PDF乱码高发区
-_GARBLED_CJK_RANGE2 = re.compile(r'[\u7240-\u727F]')  # 牛/牜部：另一个高发区
+# --- OCR 乱码检测 ---
+_GARBLED_CJK_RE = re.compile(r"[\u7280-\u72FF\u7240-\u727F]")  # 犬/牛部
+_FULLWIDTH_DIGIT_RE = re.compile(r"[\uFF10-\uFF19]")  # ０１２...
+_NON_STD_ASCII_RE = re.compile(r"[\u00A0-\u00FF]")  # Latin-1 Supplement
 
 def _is_garbled_chinese(e: str) -> bool:
-    """
-    检测疑似 PDF-OCR 乱码的实体。
-    策略：如果实体中超过 30% 的字符落在 CJK 乱码高发区（U+7280-U+72FF），
-    则判定为 OCR 错误映射，而非有效实体。
-    
-    典型乱码: 犌犅犜 (=GB/T), 狊犲狀狊狅狉犲狏犪犾狌犪狋犻狅狀 (=sensoryevaluation)
-    """
-    if not e:
+    """检测 PDF-OCR 乱码（犌犅犜=GB/T, 狊犲狀狊狅狉=sensor）"""
+    if not e or len(e) < 2:
         return False
-    total = len(e)
-    if total < 2:
-        return False
-    garbled_count = len(_GARBLED_CJK_RANGE.findall(e)) + len(_GARBLED_CJK_RANGE2.findall(e))
+    garbled_count = len(_GARBLED_CJK_RE.findall(e))
+    if garbled_count > 0:
+        garbled_count += len(_FULLWIDTH_DIGIT_RE.findall(e))
+    # 短实体中含 ¢ € 等非标准 ASCII → OCR 噪声
+    nonascii_noise = len(_NON_STD_ASCII_RE.findall(e))
+    if nonascii_noise > 0 and len(e) <= 6:
+        return True
     if garbled_count == 0:
         return False
-    garbled_ratio = garbled_count / total
-    # 如果 >30% 字符在乱码区域，认定为乱码
-    return garbled_ratio > 0.3
+    return (garbled_count / len(e)) > 0.25
 
 def _norm_relation(r: str) -> str:
     r = (r or "").strip()
@@ -609,8 +601,11 @@ class GraphRAGIndexer:
 
         # node list
         nodes_path = os.path.join(out_dir, "graph_nodes.json")
+        node_list = sorted(list(self.graph.nodes()))
+        print(f"[GRAPHRAG-SAVE] graph_nodes.json: {len(node_list)} 节点")
         with open(nodes_path, "w", encoding="utf-8") as f:
-            json.dump(sorted(list(self.graph.nodes())), f, ensure_ascii=False, indent=2)
+            json.dump(node_list, f, ensure_ascii=False, indent=2)
+        print(f"[GRAPHRAG-SAVE]   → 文件大小: {os.path.getsize(nodes_path):,} bytes")
 
         # communities
         comm_path = os.path.join(out_dir, "communities.json")
@@ -619,10 +614,15 @@ class GraphRAGIndexer:
 
         # chunk meta
         meta_path = os.path.join(out_dir, "chunk_meta.jsonl")
+        print(f"[GRAPHRAG-SAVE] chunk_meta.jsonl: {len(self.chunk_meta)} 条")
+        if self.chunk_meta:
+            first_cid = next(iter(self.chunk_meta))
+            print(f"[GRAPHRAG-SAVE]   示例: chunk_meta['{first_cid}'] = {self.chunk_meta[first_cid]}")
         with open(meta_path, "w", encoding="utf-8") as f:
             for cid, meta in self.chunk_meta.items():
                 row = {"chunk_id": cid, **meta}
                 f.write(json.dumps(row, ensure_ascii=False) + "\n")
+        print(f"[GRAPHRAG-SAVE]   → 文件大小: {os.path.getsize(meta_path):,} bytes")
 
 
 # -----------------------------
