@@ -257,8 +257,14 @@ class OCRCache:
 
     @staticmethod
     def pull_all_from_github():
-        """启动时从 GitHub 拉取所有 OCR 缓存到本地"""
+        """启动时从 GitHub 拉取所有 OCR 缓存到本地（仅本地缓存为空时执行）"""
         try:
+            # 如果本地已有缓存文件，跳过拉取
+            local_files = list(PATHS.OCR_CACHE_DIR.glob("*.txt"))
+            if local_files:
+                print(f"[INFO] 本地已有 {len(local_files)} 个 OCR 缓存，跳过 GitHub 拉取")
+                return
+            
             files = GithubSync.pull_rag_folder("tea_data/ocr_cache")
             count = 0
             for fname, content in files:
@@ -679,6 +685,7 @@ def llm_normalize_user_input(raw_query: str, client: OpenAI) -> str:
     resp = client.chat.completions.create(
         model="deepseek-chat",
         temperature=0,
+        timeout=30,
         messages=[
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": raw_query}
@@ -870,15 +877,15 @@ def _push_graphrag_artifacts_to_github(artifact_dir: str) -> bool:
             
             # 重试前等待
             if attempt < 3:
-                time.sleep(2)
+                time.sleep(1)
         
         if not push_ok:
             print(f"[ERROR]  ❌ {fname} 推送最终失败!")
             all_success = False
         
-        # >>> PATCHED: 每次推送之间等待1.5秒，避免 GitHub API 速率限制 <<<
+        # 推送之间短暂等待，避免 GitHub API 速率限制
         if i_file < len(files_to_push) - 1:
-            time.sleep(1.5)
+            time.sleep(0.5)
     
     return all_success
 
@@ -997,7 +1004,8 @@ def run_scoring(text: str, kb_res: Tuple, case_res: Tuple, prompt_cfg: Dict, emb
             model=model_id,
             messages=[{"role":"system", "content":sys_p}, {"role":"user", "content":user_p}],
             response_format={"type": "json_object"},
-            temperature=0.3
+            temperature=0.3,
+            timeout=60
         )
         # >>> 变更1：返回 sys_p 和 user_p 供 Tab1 展示 <<<
         return json.loads(resp.choices[0].message.content), hits, found_cases, sys_p, user_p
@@ -1331,6 +1339,7 @@ def load_rag_from_github(aliyun_key: str) -> Tuple[bool, str]:
         file_names = []
         parse_success = 0
         parse_failed = []
+        file_text_lengths = []  # 同时记录每个文件解析后的长度，避免二次解析
         
         for fname, fcontent in rag_files:
             file_names.append(fname)
@@ -1338,12 +1347,15 @@ def load_rag_from_github(aliyun_key: str) -> Tuple[bool, str]:
             
             parsed_text = parse_file_bytes(fname, fcontent)
             if parsed_text and len(parsed_text.strip()) > 100:  # 至少要有100个字符
+                flen = len(parsed_text) + 1  # +1 for the "\n" appended below
                 all_text += parsed_text + "\n"
                 parse_success += 1
                 print(f"[INFO]   ✅ 成功提取 {len(parsed_text):,} 字符")
             else:
+                flen = 0
                 parse_failed.append(fname)
                 print(f"[WARN]   ❌ 提取失败或文本过短 ({len(parsed_text) if parsed_text else 0} 字符)")
+            file_text_lengths.append((fname, flen))
         
         print(f"\n[INFO] 文件解析完成: {parse_success}/{len(rag_files)} 成功")
         if parse_failed:
@@ -1360,16 +1372,10 @@ def load_rag_from_github(aliyun_key: str) -> Tuple[bool, str]:
         chunks = [all_text[i:i+600] for i in range(0, len(all_text), 500)]
         print(f"[INFO]   ✓ 切片完成: {len(chunks)} 个片段")
         
-        # >>> PATCHED: 构建 chunk→源文件 映射 <<<
+        # 构建 chunk→源文件 映射（复用第2步已有的 file_text_lengths，无需二次解析）
         chunk_source_map = {}
         if file_names and parse_success > 0:
             try:
-                file_text_lengths = []
-                for fname_iter, fcontent_iter in rag_files:
-                    parsed = parse_file_bytes(fname_iter, fcontent_iter)
-                    flen = (len(parsed) + 1) if (parsed and len(parsed.strip()) > 100) else 0
-                    file_text_lengths.append((fname_iter, flen))
-                cum = 0
                 for ci in range(len(chunks)):
                     cs = ci * 500
                     acc = 0
@@ -1433,21 +1439,6 @@ def load_rag_from_github(aliyun_key: str) -> Tuple[bool, str]:
         # Build GraphRAG-style community summaries for static KB chunks (non-case)
         ResourceManager.save(kb_idx, chunks, PATHS.kb_index, PATHS.kb_chunks)
         ResourceManager.save_kb_files(file_names)
-        # >>> 新增：构建 GraphRAG artifacts <<<
-       
-        try:
-            print("[INFO] 步骤 新增: 构建 GraphRAG artifacts...")
-            graphrag_ok = build_graphrag_artifacts(
-                chunks, force_rebuild=True,
-                chunk_source_map=chunk_source_map,
-                file_names=file_names
-            )
-            if graphrag_ok:
-                print("[INFO] ✅ GraphRAG artifacts 构建并同步成功")
-            else:
-                print("[WARN] ⚠️ GraphRAG artifacts 构建未完成，将使用纯向量检索")
-        except Exception as e:
-            print(f"[WARN] GraphRAG 构建异常（不影响基本功能）: {e}")
         
         success_files = [f for f in file_names if f not in parse_failed]
         msg = f"✅ 成功加载 {len(chunks)} 条知识片段\n📁 来源文件: {', '.join(success_files)}"
@@ -1456,6 +1447,13 @@ def load_rag_from_github(aliyun_key: str) -> Tuple[bool, str]:
         
         print(f"[INFO] {msg}")
         print("[INFO] ========== RAG 加载完成 ==========\n")
+        
+        # 标记需要构建 GraphRAG（延迟到用户不操作时再构建，避免阻塞评分交互）
+        st.session_state['_graphrag_build_pending'] = True
+        st.session_state['_graphrag_build_chunks'] = chunks
+        st.session_state['_graphrag_build_chunk_source_map'] = chunk_source_map
+        st.session_state['_graphrag_build_file_names'] = file_names
+        
         return True, msg
         
     except Exception as e:
@@ -1761,6 +1759,23 @@ with st.sidebar:
     # 更新显示的数据
     kb_count = len(st.session_state.kb[1])
     kb_files = st.session_state.get('kb_files', [])
+    
+    # 延迟构建 GraphRAG artifacts（不阻塞RAG加载和评分交互）
+    if st.session_state.get('_graphrag_build_pending', False):
+        try:
+            pending_chunks = st.session_state.pop('_graphrag_build_chunks', [])
+            pending_map = st.session_state.pop('_graphrag_build_chunk_source_map', {})
+            pending_fnames = st.session_state.pop('_graphrag_build_file_names', [])
+            st.session_state['_graphrag_build_pending'] = False
+            if pending_chunks:
+                print("[INFO] 延迟构建 GraphRAG artifacts...")
+                build_graphrag_artifacts(
+                    pending_chunks, force_rebuild=True,
+                    chunk_source_map=pending_map,
+                    file_names=pending_fnames
+                )
+        except Exception as e:
+            print(f"[WARN] 延迟 GraphRAG 构建失败（不影响评分）: {e}")
     
     st.markdown(f"知识库: **{kb_count}** 条 | 判例库: **{case_count}** 条")
     if kb_files:
