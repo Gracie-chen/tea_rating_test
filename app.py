@@ -259,7 +259,6 @@ class OCRCache:
     def pull_all_from_github():
         """启动时从 GitHub 拉取所有 OCR 缓存到本地（仅本地缓存为空时执行）"""
         try:
-            # 如果本地已有缓存文件，跳过拉取
             local_files = list(PATHS.OCR_CACHE_DIR.glob("*.txt"))
             if local_files:
                 print(f"[INFO] 本地已有 {len(local_files)} 个 OCR 缓存，跳过 GitHub 拉取")
@@ -877,7 +876,7 @@ def _push_graphrag_artifacts_to_github(artifact_dir: str) -> bool:
             
             # 重试前等待
             if attempt < 3:
-                time.sleep(1)
+                time.sleep(2)
         
         if not push_ok:
             print(f"[ERROR]  ❌ {fname} 推送最终失败!")
@@ -923,15 +922,27 @@ def graphrag_static_kb_context(query_vec: np.ndarray,
         return ctx, hits
 
     try:
-        expanded = gr.expand(
-            vector_hits=vector_hits,
-            chunk_text_map=chunk_text_map,
-            top_seed=top_seed,
-            hop=hop,
-            max_expand=max_expand,
-            w_vec=0.7,
-            w_graph=0.3
-        )
+        # 使用线程超时保护 gr.expand()，避免 GraphRAG 检索 hang 住评分流程
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(
+                gr.expand,
+                vector_hits=vector_hits,
+                chunk_text_map=chunk_text_map,
+                top_seed=top_seed,
+                hop=hop,
+                max_expand=max_expand,
+                w_vec=0.7,
+                w_graph=0.3
+            )
+            try:
+                expanded = future.result(timeout=10)  # 最多等10秒
+            except concurrent.futures.TimeoutError:
+                print(f"[WARN] GraphRAG expand 超时(>10s)，回退到向量检索")
+                future.cancel()
+                hits = [kb_chunks[int(cid)] for cid, _ in vector_hits[:k_num]]
+                ctx = "\n".join([f"- {h[:240].strip()}..." for h in hits]) if hits else "（无手册资料）"
+                return ctx, hits
         seeds = expanded.get("seed_chunks", [])
         exp_chunks = expanded.get("expanded_chunks", [])
         comm = expanded.get("community_summaries", [])
@@ -1339,15 +1350,15 @@ def load_rag_from_github(aliyun_key: str) -> Tuple[bool, str]:
         file_names = []
         parse_success = 0
         parse_failed = []
-        file_text_lengths = []  # 同时记录每个文件解析后的长度，避免二次解析
+        file_text_lengths = []  # 同时记录长度，避免后续二次解析
         
         for fname, fcontent in rag_files:
             file_names.append(fname)
             print(f"\n[INFO]   → 解析 {fname} ({len(fcontent):,} bytes)...")
             
             parsed_text = parse_file_bytes(fname, fcontent)
-            if parsed_text and len(parsed_text.strip()) > 100:  # 至少要有100个字符
-                flen = len(parsed_text) + 1  # +1 for the "\n" appended below
+            if parsed_text and len(parsed_text.strip()) > 100:
+                flen = len(parsed_text) + 1
                 all_text += parsed_text + "\n"
                 parse_success += 1
                 print(f"[INFO]   ✅ 成功提取 {len(parsed_text):,} 字符")
@@ -1372,7 +1383,7 @@ def load_rag_from_github(aliyun_key: str) -> Tuple[bool, str]:
         chunks = [all_text[i:i+600] for i in range(0, len(all_text), 500)]
         print(f"[INFO]   ✓ 切片完成: {len(chunks)} 个片段")
         
-        # 构建 chunk→源文件 映射（复用第2步已有的 file_text_lengths，无需二次解析）
+        # 构建 chunk→源文件 映射（复用 file_text_lengths，无需二次解析）
         chunk_source_map = {}
         if file_names and parse_success > 0:
             try:
@@ -1440,6 +1451,12 @@ def load_rag_from_github(aliyun_key: str) -> Tuple[bool, str]:
         ResourceManager.save(kb_idx, chunks, PATHS.kb_index, PATHS.kb_chunks)
         ResourceManager.save_kb_files(file_names)
         
+        # 标记需要构建 GraphRAG（延迟到下一轮渲染，不阻塞当前流程）
+        st.session_state['_graphrag_build_pending'] = True
+        st.session_state['_graphrag_build_chunks'] = chunks
+        st.session_state['_graphrag_build_chunk_source_map'] = chunk_source_map
+        st.session_state['_graphrag_build_file_names'] = file_names
+        
         success_files = [f for f in file_names if f not in parse_failed]
         msg = f"✅ 成功加载 {len(chunks)} 条知识片段\n📁 来源文件: {', '.join(success_files)}"
         if parse_failed:
@@ -1447,13 +1464,6 @@ def load_rag_from_github(aliyun_key: str) -> Tuple[bool, str]:
         
         print(f"[INFO] {msg}")
         print("[INFO] ========== RAG 加载完成 ==========\n")
-        
-        # 标记需要构建 GraphRAG（延迟到用户不操作时再构建，避免阻塞评分交互）
-        st.session_state['_graphrag_build_pending'] = True
-        st.session_state['_graphrag_build_chunks'] = chunks
-        st.session_state['_graphrag_build_chunk_source_map'] = chunk_source_map
-        st.session_state['_graphrag_build_file_names'] = file_names
-        
         return True, msg
         
     except Exception as e:
@@ -1760,7 +1770,7 @@ with st.sidebar:
     kb_count = len(st.session_state.kb[1])
     kb_files = st.session_state.get('kb_files', [])
     
-    # 延迟构建 GraphRAG artifacts（不阻塞RAG加载和评分交互）
+    # 延迟构建 GraphRAG artifacts（不阻塞 RAG 加载和评分交互）
     if st.session_state.get('_graphrag_build_pending', False):
         try:
             pending_chunks = st.session_state.pop('_graphrag_build_chunks', [])
@@ -1844,22 +1854,31 @@ with tab1:
         if not user_input: st.warning("请输入内容")
         else:
             with st.spinner(f"正在使用 {model_id} 品鉴..."):
-                user_input = llm_normalize_user_input(user_input, client_d)
-                # >>> 变更1：接收返回的 sys_p 和 user_p <<<
-                scores, kb_h, case_h, sent_sys_p, sent_user_p = run_scoring(
-                    user_input, st.session_state.kb, st.session_state.cases,
-                    st.session_state.prompt_config, embedder, client, "Qwen3-14B", r_num, c_num
-                )
-                if scores:
-                    st.session_state.last_scores = scores
-                    st.session_state.last_master_comment = scores.get("master_comment", "")
-                    # >>> 变更1：保存发送给LLM的prompt到session_state <<<
-                    st.session_state.last_llm_sys_prompt = sent_sys_p
-                    st.session_state.last_llm_user_prompt = sent_user_p
+                try:
+                    # 步骤1：预处理（DeepSeek去噪）
+                    try:
+                        user_input = llm_normalize_user_input(user_input, client_d)
+                    except Exception as e:
+                        st.warning(f"⚠️ 预处理超时或失败({e})，将使用原始输入继续评分")
                     
-                    # 递增版本号，使校准输入框使用新的key，从而显示新的默认值
-                    st.session_state.score_version += 1
-                    st.rerun()
+                    # 步骤2：RAG检索 + LLM评分
+                    scores, kb_h, case_h, sent_sys_p, sent_user_p = run_scoring(
+                        user_input, st.session_state.kb, st.session_state.cases,
+                        st.session_state.prompt_config, embedder, client, "Qwen3-14B", r_num, c_num
+                    )
+                    if scores:
+                        st.session_state.last_scores = scores
+                        st.session_state.last_master_comment = scores.get("master_comment", "")
+                        st.session_state.last_llm_sys_prompt = sent_sys_p
+                        st.session_state.last_llm_user_prompt = sent_user_p
+                        
+                        # 递增版本号，使校准输入框使用新的key，从而显示新的默认值
+                        st.session_state.score_version += 1
+                        st.rerun()
+                    else:
+                        st.error("❌ 评分失败：模型未返回有效结果。请检查推理服务是否在线（9:00~20:00），或稍后重试。")
+                except Exception as e:
+                    st.error(f"❌ 评分过程出错：{e}")
     
     if st.session_state.last_scores:
         s = st.session_state.last_scores["scores"]
